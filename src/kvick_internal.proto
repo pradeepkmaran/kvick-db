@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package kvick;
+
+// --- Gossip / SWIM Protocol ---
+
+message NodeInfo {
+  string node_id = 1;
+  string address = 2; // e.g., "192.168.1.10:50051"
+  uint64 incarnation = 3;
+  enum State {
+    ALIVE = 0;
+    SUSPECT = 1;
+    DEAD = 2;
+    LEFT = 3;
+  }
+  State state = 4;
+}
+
+message PingMessage {
+  string sender_id = 1;
+  string sender_address = 2;
+  repeated NodeInfo piggybacked_updates = 3;
+}
+
+message AckMessage {
+  string sender_id = 1;
+  repeated NodeInfo piggybacked_updates = 2;
+}
+
+message PingReqMessage {
+  string sender_id = 1;
+  string target_id = 2;
+  string target_address = 3;
+  repeated NodeInfo piggybacked_updates = 4;
+}
+
+service GossipService {
+  rpc Ping(PingMessage) returns (AckMessage);
+  rpc PingReq(PingReqMessage) returns (AckMessage);
+}
+
+// --- KV Proxy Protocol ---
+
+message KVRequest {
+  string op = 1; // GET, SET, DEL
+  string key = 2;
+  string value = 3; // Empty for GET/DEL
+}
+
+message KVResponse {
+  bool success = 1;
+  string result = 2; // Value for GET, or error message, or "OK"
+}
+
+service KVProxyService {
+  rpc ProxyCommand(KVRequest) returns (KVResponse);
+}

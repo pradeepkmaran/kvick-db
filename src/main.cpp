@@ -1,24 +1,32 @@
 #include "KVickServer.hpp"
 #include <iostream>
-#include <cstdlib>
+#include <vector>
+#include <string>
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <port>\n";
-        return 1;
-    }
+    int port = 8080;
+    std::string node_id = "node1";
+    std::string grpc_address = "0.0.0.0:50051";
+    std::vector<std::string> seed_nodes;
 
-    int port = std::atoi(argv[1]);
-    if (port <= 0 || port > 65535) {
-        std::cerr << "Invalid port number: " << argv[1] << std::endl;
-        return 1;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--port" && i + 1 < argc) {
+            port = std::stoi(argv[++i]);
+        } else if (arg == "--id" && i + 1 < argc) {
+            node_id = argv[++i];
+        } else if (arg == "--grpc" && i + 1 < argc) {
+            grpc_address = argv[++i];
+        } else if (arg == "--seed" && i + 1 < argc) {
+            seed_nodes.push_back(argv[++i]);
+        }
     }
 
     try {
-        KVickServer server(port);
+        KVickServer server(port, node_id, grpc_address, seed_nodes);
         server.start();
     } catch (const std::exception& e) {
-        std::cerr << "Server error: " << e.what() << std::endl;
+        std::cerr << "Fatal error: " << e.what() << std::endl;
         return 1;
     }
 
