@@ -55,7 +55,8 @@ uint64_t KVickStateMachine::last_commit_index() {
 void KVickStateMachine::create_snapshot(nuraft::snapshot& s, nuraft::async_result<bool>::handler_type& when_done) {
     if (when_done) {
         nuraft::ptr<std::exception> ex(nullptr);
-        when_done(true, ex);
+        bool result = true;
+        when_done(result, ex);
     }
 }
 

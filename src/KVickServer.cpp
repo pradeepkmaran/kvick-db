@@ -2,10 +2,14 @@
 #include <iostream>
 #include <sstream>
 
-KVickServer::KVickServer(int port, const std::string& node_id, const std::string& grpc_address, const std::vector<std::string>& seed_nodes) 
+KVickServer::KVickServer(int port, const std::string& node_id, const std::string& grpc_address, const std::vector<std::string>& seed_nodes)  
     : port_(port), node_id_(node_id), grpc_address_(grpc_address), epoll_fd_(-1), server_fd_(-1),
-      proxy_service_(this), gossip_service_(nullptr) {
+      proxy_service_(std::make_unique<kvick::KVProxyServiceImpl>(this)),
+      gossip_service_(nullptr) {       
     
+    cluster_manager_ = std::make_unique<kvick::ClusterManager>(node_id, grpc_address, seed_nodes);
+    gossip_service_ = std::make_unique<kvick::GossipServiceImpl>(cluster_manager_.get());
+
     const std::string data_path = "/app/data/kvick_data_" + node_id + ".bin";
     const std::string wal_path = "/app/data/kvick_" + node_id + ".wal";
     
@@ -16,7 +20,7 @@ KVickServer::KVickServer(int port, const std::string& node_id, const std::string
     enableAutoPersist(data_path, 30);
 
     cluster_manager_ = std::make_unique<kvick::ClusterManager>(node_id, grpc_address, seed_nodes);
-    gossip_service_ = kvick::GossipServiceImpl(cluster_manager_.get());
+    gossip_service_ = std::make_unique<kvick::GossipServiceImpl>(cluster_manager_.get());
 
     int num_workers = std::thread::hardware_concurrency();
     if (num_workers == 0) num_workers = 4;
@@ -108,8 +112,8 @@ void KVickServer::start() {
     // Start gRPC server
     grpc::ServerBuilder builder;
     builder.AddListeningPort(grpc_address_, grpc::InsecureServerCredentials());
-    builder.RegisterService(&proxy_service_);
-    builder.RegisterService(&gossip_service_);
+    builder.RegisterService(proxy_service_.get());
+    builder.RegisterService(gossip_service_.get());
     grpc_server_ = builder.BuildAndStart();
     std::cout << "gRPC Server listening on " << grpc_address_ << std::endl;
 

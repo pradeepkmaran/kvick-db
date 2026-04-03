@@ -126,8 +126,8 @@ private:
 
     std::unique_ptr<kvick::ClusterManager> cluster_manager_;
     std::unique_ptr<grpc::Server> grpc_server_;
-    kvick::KVProxyServiceImpl proxy_service_;
-    kvick::GossipServiceImpl gossip_service_;
+    std::unique_ptr<kvick::KVProxyServiceImpl> proxy_service_;
+    std::unique_ptr<kvick::GossipServiceImpl> gossip_service_;
 
     void worker_loop();
     void handleClientCommand(int sock);

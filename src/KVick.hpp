@@ -1,6 +1,7 @@
 #ifndef KVICK_HPP
 #define KVICK_HPP
 
+#include <fstream>  
 #include <iostream>
 #include <string>
 #include <unordered_map>

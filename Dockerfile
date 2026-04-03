@@ -1,33 +1,30 @@
 FROM ubuntu:24.04
 
-# Install build dependencies + gRPC/Protobuf
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    g++ \
-    git \
-    libgrpc++-dev \
-    protobuf-compiler-grpc \
-    libprotobuf-dev \
-    protobuf-compiler \
-    libssl-dev \
-    zlib1g-dev \
+    build-essential cmake g++ git \
+    libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
+    libasio-dev \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+RUN git clone https://github.com/eBay/NuRaft.git /nuraft && \
+    cd /nuraft && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DASIO_STANDALONE=ON && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
 
+WORKDIR /app
 COPY . /app
 
 # Build the project
-RUN mkdir build && cd build && cmake .. && make -j$(n_proc)
+RUN rm -rf build && mkdir build && cd build && cmake .. && make -j$(nproc)
 
-# Default Environment Variables
 ENV PORT=8080
 ENV NODE_ID=node1
 ENV GRPC_PORT=50051
 ENV SEED_NODES=""
 
-# default port
 EXPOSE $PORT
 EXPOSE $GRPC_PORT
 
