@@ -168,6 +168,8 @@ services:
       NODE_ID: node1
       GRPC_PORT: 50051
       RAFT_PORT: 10051
+      ADVERTISE_ADDRESS: kvick-node1:50051
+      SEED_NODES: kvick-node1:50051
     networks: [kvick-net]
 
   node2:
@@ -180,7 +182,8 @@ services:
       NODE_ID: node2
       GRPC_PORT: 50052
       RAFT_PORT: 10052
-      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: kvick-node2:50052
+      SEED_NODES: kvick-node1:50051
     depends_on: [node1]
     networks: [kvick-net]
 

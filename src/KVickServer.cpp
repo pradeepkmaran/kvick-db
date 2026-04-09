@@ -123,9 +123,11 @@ grpc::Status KVProxyServiceImpl::JoinCluster(grpc::ServerContext* context,
 // ---- KVickServer ----
 
 KVickServer::KVickServer(int port, const std::string& node_id, const std::string& grpc_address,
+                         const std::string& advertise_address,
                          int raft_port, const std::vector<std::string>& seed_nodes,
                          const std::string& data_dir)
     : port_(port), node_id_(node_id), grpc_address_(grpc_address),
+      advertise_address_(advertise_address),
       raft_port_(raft_port), data_dir_(data_dir), epoll_fd_(-1), server_fd_(-1) {
 
     setupSignals();
@@ -137,14 +139,21 @@ KVickServer::KVickServer(int port, const std::string& node_id, const std::string
 
     store_.enableAutoPersist(data_path, 30);
 
-    // Create Raft manager
-    raft_manager_ = std::make_unique<kvick::RaftManager>(node_id, raft_port, &store_, data_dir);
+    // Extract hostname from advertise_address ("host:port" -> "host")
+    std::string advertise_host = advertise_address_;
+    auto colon_pos = advertise_host.find(':');
+    if (colon_pos != std::string::npos) {
+        advertise_host = advertise_host.substr(0, colon_pos);
+    }
+    std::string raft_endpoint = advertise_host + ":" + std::to_string(raft_port);
 
-    // Create Cluster manager
+    // Create Raft manager — use advertised hostname so peers can reach us
+    raft_manager_ = std::make_unique<kvick::RaftManager>(node_id, raft_port, raft_endpoint, &store_, data_dir);
+
+    // Create Cluster manager — use advertise_address so peers can actually reach us
     int32_t raft_server_id = kvick::hash::node_id_to_server_id(node_id);
-    std::string raft_endpoint = "0.0.0.0:" + std::to_string(raft_port);
     cluster_manager_ = std::make_unique<kvick::ClusterManager>(
-        node_id, grpc_address, raft_endpoint, raft_server_id, seed_nodes);
+        node_id, advertise_address_, raft_endpoint, raft_server_id, seed_nodes);
 
     // Create gRPC services
     proxy_service_ = std::make_unique<kvick::KVProxyServiceImpl>(
@@ -203,12 +212,30 @@ void KVickServer::worker_loop() {
 
 // ---- gRPC channel pooling ----
 
+#include <netdb.h>
+#include <arpa/inet.h>
+
 std::shared_ptr<kvick::KVProxyService::Stub> KVickServer::getProxyStub(const std::string& address) {
     std::lock_guard<std::mutex> lock(stubs_mutex_);
     auto it = proxy_stubs_.find(address);
     if (it != proxy_stubs_.end()) return it->second;
 
-    auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+    std::string target_addr = address;
+    auto colon = address.find(':');
+    if (colon != std::string::npos) {
+        std::string host = address.substr(0, colon);
+        std::string port = address.substr(colon + 1);
+        struct addrinfo hints{}, *res;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
+            char ipstr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, ipstr, sizeof(ipstr));
+            freeaddrinfo(res);
+            target_addr = "ipv4:" + std::string(ipstr) + ":" + port;
+        }
+    }
+    auto channel = grpc::CreateChannel(target_addr, grpc::InsecureChannelCredentials());
     auto stub = kvick::KVProxyService::NewStub(channel);
     proxy_stubs_[address] = std::move(stub);
     return proxy_stubs_[address];
@@ -303,9 +330,13 @@ void KVickServer::requestJoinRaftCluster() {
         auto stub = getProxyStub(node.address());
         kvick::JoinRequest req;
         req.set_server_id(kvick::hash::node_id_to_server_id(node_id_));
-        req.set_raft_endpoint("0.0.0.0:" + std::to_string(raft_port_));
+        // Use advertised hostname for Raft endpoint so leader can reach us
+        std::string adv_host = advertise_address_;
+        auto cp = adv_host.find(':');
+        if (cp != std::string::npos) adv_host = adv_host.substr(0, cp);
+        req.set_raft_endpoint(adv_host + ":" + std::to_string(raft_port_));
         req.set_node_id(node_id_);
-        req.set_grpc_address(grpc_address_);
+        req.set_grpc_address(advertise_address_);
 
         kvick::JoinResponse res;
         grpc::ClientContext context;
@@ -332,7 +363,9 @@ void KVickServer::start() {
     std::cout << "gRPC Server listening on " << grpc_address_ << std::endl;
 
     // Start SWIM gossip
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     cluster_manager_->start();
+
 
     // Start Raft
     raft_manager_->start();
@@ -485,27 +518,26 @@ void KVickServer::handleClientCommand(int sock) {
         std::string op, key, val_str;
         iss >> op >> key;
 
-        // --- GET: route to owner via consistent hashing ---
+        // --- GET: try local first, fallback to Raft leader ---
         if (op == "GET") {
-            std::string owner = cluster_manager_->getOwnerNode(key);
-
-            if (owner == node_id_) {
-                // This node owns the key — read locally
-                try {
-                    auto v = store_.get(key);
-                    std::string out = formatValue(*v) + "\n";
-                    sendResponse(sock, out);
-                } catch (const std::exception& e) {
-                    sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
-                }
-            } else {
-                // Proxy GET to the owner node
-                std::string owner_addr = cluster_manager_->getAddressByNodeId(owner);
-                if (owner_addr.empty()) {
-                    sendResponse(sock, "ERR Owner node unreachable\n");
+            try {
+                auto v = store_.get(key);
+                sendResponse(sock, formatValue(*v) + "\n");
+            } catch (const std::exception& e) {
+                // Key not found locally — if we're not the leader, try the leader
+                // (it's guaranteed to have the latest committed data)
+                if (!raft_manager_->isLeader()) {
+                    int32_t leader_id = raft_manager_->getLeaderId();
+                    std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
+                    if (!leader_addr.empty() && leader_addr != advertise_address_) {
+                        std::string res = proxyToAddress(leader_addr, "GET", key);
+                        sendResponse(sock, res);
+                    } else {
+                        sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
+                    }
                 } else {
-                    std::string res = proxyToAddress(owner_addr, "GET", key);
-                    sendResponse(sock, res);
+                    // We ARE the leader and key doesn't exist
+                    sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
                 }
             }
         }

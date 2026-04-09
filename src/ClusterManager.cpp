@@ -117,11 +117,29 @@ std::string ClusterManager::getAddressByNodeId(const std::string& node_id) const
     return "";
 }
 
+#include <netdb.h>
+#include <arpa/inet.h>
+
 std::shared_ptr<GossipService::Stub> ClusterManager::getStub(const std::string& address) {
     std::lock_guard<std::mutex> lock(stubs_mutex_);
     auto it = stubs_.find(address);
     if (it == stubs_.end()) {
-        auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+        std::string target_addr = address;
+        auto colon = address.find(':');
+        if (colon != std::string::npos) {
+            std::string host = address.substr(0, colon);
+            std::string port = address.substr(colon + 1);
+            struct addrinfo hints{}, *res;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
+                char ipstr[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, ipstr, sizeof(ipstr));
+                freeaddrinfo(res);
+                target_addr = "ipv4:" + std::string(ipstr) + ":" + port;
+            }
+        }
+        auto channel = grpc::CreateChannel(target_addr, grpc::InsecureChannelCredentials());
         auto stub = GossipService::NewStub(channel);
         stubs_[address] = std::move(stub);
         return stubs_[address];
@@ -170,33 +188,47 @@ void ClusterManager::checkSuspectTimeouts() {
 }
 
 void ClusterManager::gossipLoop() {
-    // Initial join: Ping seeds
-    for (const auto& seed : seed_nodes_) {
-        if (seed == address_) continue;
+    // Initial join: Ping seeds with retries
+    bool joined = false;
+    for (int attempt = 0; attempt < 10 && !joined && !stop_flag_; ++attempt) {
+        for (const auto& seed : seed_nodes_) {
+            if (seed == address_) continue;
 
-        PingMessage req;
-        req.set_sender_id(node_id_);
-        req.set_sender_address(address_);
+            PingMessage req;
+            req.set_sender_id(node_id_);
+            req.set_sender_address(address_);
 
-        // Piggyback self info so seed learns about us
-        NodeInfo self_info;
-        {
-            std::lock_guard<std::mutex> lock(nodes_mutex_);
-            self_info = nodes_[node_id_];
-        }
-        *req.add_piggybacked_updates() = self_info;
-
-        AckMessage res;
-        grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
-
-        auto stub = getStub(seed);
-        grpc::Status status = stub->Ping(&context, req, &res);
-        if (status.ok()) {
-            for (const auto& update : res.piggybacked_updates()) {
-                updateNode(update);
+            // Piggyback self info so seed learns about us
+            NodeInfo self_info;
+            {
+                std::lock_guard<std::mutex> lock(nodes_mutex_);
+                self_info = nodes_[node_id_];
             }
-            std::cout << "[SWIM] Joined cluster via seed " << seed << std::endl;
+            *req.add_piggybacked_updates() = self_info;
+
+            AckMessage res;
+            grpc::ClientContext context;
+            context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+            // context.set_wait_for_ready(true); // Wait for channel to connect instead of fast-failing during backoff
+
+            std::cout << "[SWIM DEBUG] Sending Ping to " << seed << std::endl;
+            auto stub = getStub(seed);
+            grpc::Status status = stub->Ping(&context, req, &res);
+            if (status.ok()) {
+                for (const auto& update : res.piggybacked_updates()) {
+                    updateNode(update);
+                }
+                std::cout << "[SWIM] Joined cluster via seed " << seed << std::endl;
+                joined = true;
+                break;
+            } else {
+                std::cout << "[SWIM] Seed ping to " << seed << " failed (attempt "
+                          << attempt + 1 << "): " << status.error_message() 
+                          << " (code " << status.error_code() << ")" << std::endl;
+            }
+        }
+        if (!joined) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }
 
@@ -308,6 +340,7 @@ void ClusterManager::gossipLoop() {
 }
 
 grpc::Status ClusterManager::Ping(grpc::ServerContext* context, const PingMessage* request, AckMessage* response) {
+    std::cout << "[SWIM DEBUG] Received Ping from " << request->sender_id() << std::endl;
     for (const auto& update : request->piggybacked_updates()) {
         updateNode(update);
     }

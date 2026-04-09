@@ -70,6 +70,7 @@ private:
 class KVickServer {
 public:
     KVickServer(int port, const std::string& node_id, const std::string& grpc_address,
+                const std::string& advertise_address,
                 int raft_port, const std::vector<std::string>& seed_nodes,
                 const std::string& data_dir);
     void start();
@@ -90,6 +91,7 @@ private:
     int port_;
     std::string node_id_;
     std::string grpc_address_;
+    std::string advertise_address_;
     int raft_port_;
     std::string data_dir_;
     int epoll_fd_;

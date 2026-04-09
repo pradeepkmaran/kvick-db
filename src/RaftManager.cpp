@@ -24,16 +24,18 @@ private:
     int level_ = 4; // Warning level
 };
 
-RaftManager::RaftManager(const std::string& node_id, int raft_port, KVick* store,
-                         const std::string& data_dir)
+RaftManager::RaftManager(const std::string& node_id, int raft_port,
+                         const std::string& advertise_endpoint,
+                         KVick* store, const std::string& data_dir)
     : node_id_(node_id), raft_port_(raft_port), data_dir_(data_dir) {
 
     server_id_ = hash::node_id_to_server_id(node_id);
 
     state_machine_ = nuraft::cs_new<KVickStateMachine>(store);
 
-    std::string endpoint = "0.0.0.0:" + std::to_string(raft_port);
-    state_manager_ = nuraft::cs_new<KVickStateManager>(server_id_, endpoint, data_dir);
+    // Use advertise_endpoint for config so peers can reach us
+    // (NuRaft still binds on 0.0.0.0:raft_port via the launcher)
+    state_manager_ = nuraft::cs_new<KVickStateManager>(server_id_, advertise_endpoint, data_dir);
 }
 
 RaftManager::~RaftManager() {

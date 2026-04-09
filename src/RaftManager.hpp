@@ -17,8 +17,9 @@ public:
         std::string message;
     };
 
-    RaftManager(const std::string& node_id, int raft_port, KVick* store,
-                const std::string& data_dir);
+    RaftManager(const std::string& node_id, int raft_port,
+                const std::string& advertise_endpoint,
+                KVick* store, const std::string& data_dir);
     ~RaftManager();
 
     void start();
