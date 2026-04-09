@@ -2,18 +2,25 @@
 #include <iostream>
 #include <chrono>
 #include <functional>
+#include <algorithm>
 
 namespace kvick {
 
-ClusterManager::ClusterManager(const std::string& node_id, const std::string& address, const std::vector<std::string>& seed_nodes)
-    : node_id_(node_id), address_(address), incarnation_(0), seed_nodes_(seed_nodes), rng_(std::random_device{}()) {
-    
+ClusterManager::ClusterManager(const std::string& node_id, const std::string& address,
+                               const std::string& raft_endpoint, int32_t raft_server_id,
+                               const std::vector<std::string>& seed_nodes)
+    : node_id_(node_id), address_(address), raft_endpoint_(raft_endpoint),
+      raft_server_id_(raft_server_id), incarnation_(0),
+      seed_nodes_(seed_nodes), rng_(std::random_device{}()) {
+
     NodeInfo self_info;
     self_info.set_node_id(node_id_);
     self_info.set_address(address_);
     self_info.set_incarnation(incarnation_);
     self_info.set_state(NodeInfo::ALIVE);
-    
+    self_info.set_raft_endpoint(raft_endpoint_);
+    self_info.set_raft_server_id(raft_server_id_);
+
     nodes_[node_id_] = self_info;
     rebuildHashRing();
 }
@@ -36,17 +43,26 @@ void ClusterManager::stop() {
 void ClusterManager::updateNode(const NodeInfo& info) {
     std::lock_guard<std::mutex> lock(nodes_mutex_);
     auto it = nodes_.find(info.node_id());
-    
+
     bool ring_needs_rebuild = false;
 
     if (it == nodes_.end()) {
         nodes_[info.node_id()] = info;
         ring_needs_rebuild = true;
+        std::cout << "[SWIM] Discovered new node: " << info.node_id()
+                  << " at " << info.address() << std::endl;
     } else {
         if (info.incarnation() > it->second.incarnation()) {
+            auto old_state = it->second.state();
             it->second = info;
+
+            if (info.state() == NodeInfo::ALIVE && old_state != NodeInfo::ALIVE) {
+                ring_needs_rebuild = true;
+                suspect_timers_.erase(info.node_id());
+            }
             if (info.state() == NodeInfo::DEAD || info.state() == NodeInfo::LEFT) {
                 ring_needs_rebuild = true;
+                suspect_timers_.erase(info.node_id());
             }
         }
     }
@@ -64,7 +80,7 @@ void ClusterManager::rebuildHashRing() {
         if (info.state() == NodeInfo::ALIVE || info.state() == NodeInfo::SUSPECT) {
             for (int i = 0; i < VIRTUAL_NODES; ++i) {
                 std::string vnode_key = id + "#" + std::to_string(i);
-                size_t hash = std::hash<std::string>{}(vnode_key);
+                uint32_t hash = hash::hash_string(vnode_key);
                 hash_ring_[hash] = id;
             }
         }
@@ -73,15 +89,32 @@ void ClusterManager::rebuildHashRing() {
 
 std::string ClusterManager::getOwnerNode(const std::string& key) const {
     std::lock_guard<std::mutex> lock(ring_mutex_);
-    if (hash_ring_.empty()) return node_id_; // Fallback to self
+    if (hash_ring_.empty()) return node_id_;
 
-    size_t hash = std::hash<std::string>{}(key);
+    uint32_t hash = hash::hash_string(key);
     auto it = hash_ring_.lower_bound(hash);
-    
+
     if (it == hash_ring_.end()) {
-        it = hash_ring_.begin(); // Wrap around
+        it = hash_ring_.begin();
     }
     return it->second;
+}
+
+std::string ClusterManager::getAddressByServerId(int32_t server_id) const {
+    std::lock_guard<std::mutex> lock(nodes_mutex_);
+    for (const auto& [id, info] : nodes_) {
+        if (info.raft_server_id() == server_id) {
+            return info.address();
+        }
+    }
+    return "";
+}
+
+std::string ClusterManager::getAddressByNodeId(const std::string& node_id) const {
+    std::lock_guard<std::mutex> lock(nodes_mutex_);
+    auto it = nodes_.find(node_id);
+    if (it != nodes_.end()) return it->second.address();
+    return "";
 }
 
 std::shared_ptr<GossipService::Stub> ClusterManager::getStub(const std::string& address) {
@@ -96,33 +129,82 @@ std::shared_ptr<GossipService::Stub> ClusterManager::getStub(const std::string& 
     return it->second;
 }
 
+std::vector<NodeInfo> ClusterManager::selectRandomNodes(size_t k, const std::string& exclude_id) {
+    std::vector<NodeInfo> candidates;
+    {
+        std::lock_guard<std::mutex> lock(nodes_mutex_);
+        for (const auto& [id, info] : nodes_) {
+            if (id != node_id_ && id != exclude_id &&
+                info.state() != NodeInfo::DEAD && info.state() != NodeInfo::LEFT) {
+                candidates.push_back(info);
+            }
+        }
+    }
+    std::shuffle(candidates.begin(), candidates.end(), rng_);
+    if (candidates.size() > k) candidates.resize(k);
+    return candidates;
+}
+
+void ClusterManager::checkSuspectTimeouts() {
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(nodes_mutex_);
+    std::vector<std::string> to_remove;
+
+    for (auto& [id, deadline] : suspect_timers_) {
+        if (now >= deadline) {
+            auto it = nodes_.find(id);
+            if (it != nodes_.end() && it->second.state() == NodeInfo::SUSPECT) {
+                std::cout << "[SWIM] Node " << id << " suspect timeout — marking DEAD" << std::endl;
+                it->second.set_incarnation(it->second.incarnation() + 1);
+                it->second.set_state(NodeInfo::DEAD);
+                to_remove.push_back(id);
+            }
+        }
+    }
+    for (const auto& id : to_remove) {
+        suspect_timers_.erase(id);
+    }
+    if (!to_remove.empty()) {
+        rebuildHashRing();
+    }
+}
+
 void ClusterManager::gossipLoop() {
     // Initial join: Ping seeds
     for (const auto& seed : seed_nodes_) {
         if (seed == address_) continue;
-        
+
         PingMessage req;
         req.set_sender_id(node_id_);
         req.set_sender_address(address_);
-        
+
+        // Piggyback self info so seed learns about us
+        NodeInfo self_info;
+        {
+            std::lock_guard<std::mutex> lock(nodes_mutex_);
+            self_info = nodes_[node_id_];
+        }
+        *req.add_piggybacked_updates() = self_info;
+
         AckMessage res;
         grpc::ClientContext context;
-        // set 1 sec timeout
-        auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
-        context.set_deadline(deadline);
-        
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+
         auto stub = getStub(seed);
         grpc::Status status = stub->Ping(&context, req, &res);
         if (status.ok()) {
             for (const auto& update : res.piggybacked_updates()) {
                 updateNode(update);
             }
+            std::cout << "[SWIM] Joined cluster via seed " << seed << std::endl;
         }
     }
 
     // Periodic gossip loop
     while (!stop_flag_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        checkSuspectTimeouts();
 
         std::vector<NodeInfo> active_nodes;
         {
@@ -144,15 +226,25 @@ void ClusterManager::gossipLoop() {
         req.set_sender_id(node_id_);
         req.set_sender_address(address_);
 
-        // Piggyback updates (for simplicity, piggyback all alive nodes; in reality, send diffs)
-        for (const auto& n : active_nodes) {
-            *req.add_piggybacked_updates() = n;
+        // Bounded piggybacking — send at most MAX_PIGGYBACK_UPDATES nodes
+        {
+            std::lock_guard<std::mutex> lock(nodes_mutex_);
+            int count = 0;
+            // Always include self
+            *req.add_piggybacked_updates() = nodes_[node_id_];
+            count++;
+            for (const auto& [id, info] : nodes_) {
+                if (id == node_id_) continue;
+                if (count >= MAX_PIGGYBACK_UPDATES) break;
+                *req.add_piggybacked_updates() = info;
+                count++;
+            }
         }
 
         AckMessage res;
         grpc::ClientContext context;
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(300));
-        
+
         auto stub = getStub(target.address());
         grpc::Status status = stub->Ping(&context, req, &res);
 
@@ -161,10 +253,56 @@ void ClusterManager::gossipLoop() {
                 updateNode(update);
             }
         } else {
-            // Failed to ping. Mark as suspect and attempt PingReq via a proxy (omitted for brevity, just marking dead)
-            target.set_incarnation(target.incarnation() + 1);
-            target.set_state(NodeInfo::DEAD); // SWIM usually goes to Suspect first
-            updateNode(target);
+            // Failed to ping — SWIM Suspect phase
+            std::string target_id = target.node_id();
+
+            // Check if already suspect
+            {
+                std::lock_guard<std::mutex> lock(nodes_mutex_);
+                auto it = nodes_.find(target_id);
+                if (it != nodes_.end() && it->second.state() == NodeInfo::ALIVE) {
+                    std::cout << "[SWIM] Direct ping to " << target_id
+                              << " failed — trying indirect PingReq" << std::endl;
+                }
+            }
+
+            // Indirect probe via PingReq to K random peers
+            auto proxies = selectRandomNodes(PING_REQ_FANOUT, target_id);
+            bool probed_alive = false;
+
+            for (auto& proxy : proxies) {
+                PingReqMessage ping_req;
+                ping_req.set_sender_id(node_id_);
+                ping_req.set_target_id(target_id);
+                ping_req.set_target_address(target.address());
+
+                AckMessage ping_req_ack;
+                grpc::ClientContext ctx;
+                ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(500));
+
+                auto proxy_stub = getStub(proxy.address());
+                grpc::Status prs = proxy_stub->PingReq(&ctx, ping_req, &ping_req_ack);
+                if (prs.ok()) {
+                    probed_alive = true;
+                    for (const auto& update : ping_req_ack.piggybacked_updates()) {
+                        updateNode(update);
+                    }
+                    break;
+                }
+            }
+
+            if (!probed_alive) {
+                // Mark as SUSPECT (not DEAD) and start timer
+                std::lock_guard<std::mutex> lock(nodes_mutex_);
+                auto it = nodes_.find(target_id);
+                if (it != nodes_.end() && it->second.state() == NodeInfo::ALIVE) {
+                    it->second.set_incarnation(it->second.incarnation() + 1);
+                    it->second.set_state(NodeInfo::SUSPECT);
+                    suspect_timers_[target_id] = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(SUSPECT_TIMEOUT_MS);
+                    std::cout << "[SWIM] Node " << target_id << " marked SUSPECT" << std::endl;
+                }
+            }
         }
     }
 }
@@ -173,7 +311,7 @@ grpc::Status ClusterManager::Ping(grpc::ServerContext* context, const PingMessag
     for (const auto& update : request->piggybacked_updates()) {
         updateNode(update);
     }
-    
+
     // Add sender to nodes if new
     NodeInfo sender_info;
     sender_info.set_node_id(request->sender_id());
@@ -183,17 +321,45 @@ grpc::Status ClusterManager::Ping(grpc::ServerContext* context, const PingMessag
     updateNode(sender_info);
 
     response->set_sender_id(node_id_);
-    
+
+    // Bounded piggybacking
     std::lock_guard<std::mutex> lock(nodes_mutex_);
+    int count = 0;
     for (const auto& [id, info] : nodes_) {
+        if (count >= MAX_PIGGYBACK_UPDATES) break;
         *response->add_piggybacked_updates() = info;
+        count++;
     }
 
     return grpc::Status::OK;
 }
 
 grpc::Status ClusterManager::PingReq(grpc::ServerContext* context, const PingReqMessage* request, AckMessage* response) {
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "PingReq not implemented yet");
+    // Indirect probe: ping the target on behalf of the requester
+    PingMessage probe;
+    probe.set_sender_id(node_id_);
+    probe.set_sender_address(address_);
+    for (const auto& update : request->piggybacked_updates()) {
+        *probe.add_piggybacked_updates() = update;
+    }
+
+    AckMessage probe_ack;
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(300));
+
+    auto stub = getStub(request->target_address());
+    grpc::Status status = stub->Ping(&ctx, probe, &probe_ack);
+
+    if (status.ok()) {
+        response->set_sender_id(node_id_);
+        for (const auto& update : probe_ack.piggybacked_updates()) {
+            *response->add_piggybacked_updates() = update;
+            updateNode(update);
+        }
+        return grpc::Status::OK;
+    }
+
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Target unreachable via indirect probe");
 }
 
 std::vector<NodeInfo> ClusterManager::getActiveNodes() const {

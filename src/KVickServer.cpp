@@ -1,27 +1,157 @@
 #include "KVickServer.hpp"
+#include "Hash.hpp"
 #include <iostream>
 #include <sstream>
+#include <cerrno>
+#include <cstring>
 
-KVickServer::KVickServer(int port, const std::string& node_id, const std::string& grpc_address, const std::vector<std::string>& seed_nodes)  
-    : port_(port), node_id_(node_id), grpc_address_(grpc_address), epoll_fd_(-1), server_fd_(-1),
-      proxy_service_(std::make_unique<kvick::KVProxyServiceImpl>(this)),
-      gossip_service_(nullptr) {       
-    
-    cluster_manager_ = std::make_unique<kvick::ClusterManager>(node_id, grpc_address, seed_nodes);
+// ---- Signal handling ----
+
+void KVickServer::signalHandler(int sig) {
+    globalStopFlag() = true;
+}
+
+void KVickServer::setupSignals() {
+    struct sigaction sa{};
+    sa.sa_handler = signalHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
+    // Self-pipe trick for waking epoll
+    if (pipe(signal_pipe_) == 0) {
+        setNonBlocking(signal_pipe_[0]);
+        setNonBlocking(signal_pipe_[1]);
+    }
+}
+
+// ---- gRPC Service Implementations ----
+
+namespace kvick {
+
+std::string KVProxyServiceImpl::formatValue(const KVick::ValueType& val) {
+    return std::visit([](auto&& x) -> std::string {
+        using T = std::decay_t<decltype(x)>;
+        if constexpr (std::is_same_v<T, std::string>) return x;
+        else if constexpr (std::is_same_v<T, int64_t>) return std::to_string(x);
+        else if constexpr (std::is_same_v<T, double>) return std::to_string(x);
+        else if constexpr (std::is_same_v<T, bool>) return x ? "true" : "false";
+        else if constexpr (std::is_same_v<T, std::vector<std::string>> ||
+                           std::is_same_v<T, std::vector<int64_t>> ||
+                           std::is_same_v<T, std::vector<double>> ||
+                           std::is_same_v<T, std::vector<bool>>) {
+            std::ostringstream oss;
+            oss << "[";
+            for (size_t i = 0; i < x.size(); ++i) {
+                if constexpr (std::is_same_v<T, std::vector<bool>>) oss << (x[i] ? "true" : "false");
+                else if constexpr (std::is_same_v<T, std::vector<int64_t>> || std::is_same_v<T, std::vector<double>>) oss << std::to_string(x[i]);
+                else oss << x[i];
+                if (i + 1 < x.size()) oss << ", ";
+            }
+            oss << "]";
+            return oss.str();
+        }
+        return "";
+    }, val);
+}
+
+grpc::Status KVProxyServiceImpl::ProxyCommand(grpc::ServerContext* context,
+                                               const KVRequest* request,
+                                               KVResponse* response) {
+    try {
+        if (request->op() == "GET") {
+            auto val = store_->get(request->key());
+            response->set_success(true);
+            response->set_result(formatValue(*val));
+        } else if (request->op() == "SET" || request->op() == "DEL") {
+            // All writes go through Raft
+            std::string command;
+            if (request->op() == "SET") {
+                command = "SET " + request->key() + " " + request->value();
+            } else {
+                command = "DEL " + request->key();
+            }
+
+            if (raft_ && raft_->isLeader()) {
+                auto result = raft_->proposeWrite(command);
+                response->set_success(result.success);
+                response->set_result(result.message);
+            } else {
+                // Not leader — tell caller who the leader is
+                response->set_success(false);
+                response->set_result("ERR Not leader");
+                if (raft_ && cluster_) {
+                    int32_t leader_id = raft_->getLeaderId();
+                    std::string leader_addr = cluster_->getAddressByServerId(leader_id);
+                    response->set_leader_address(leader_addr);
+                }
+            }
+        } else {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Unknown operation");
+        }
+    } catch (const std::exception& e) {
+        response->set_success(false);
+        response->set_result(e.what());
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status KVProxyServiceImpl::JoinCluster(grpc::ServerContext* context,
+                                              const JoinRequest* request,
+                                              JoinResponse* response) {
+    if (!raft_ || !raft_->isLeader()) {
+        response->set_success(false);
+        response->set_error("Not the leader");
+        return grpc::Status::OK;
+    }
+
+    bool ok = raft_->addServer(request->server_id(), request->raft_endpoint());
+    response->set_success(ok);
+    if (!ok) response->set_error("Failed to add server to Raft cluster");
+
+    std::cout << "[Raft] Join request from " << request->node_id()
+              << " (server_id=" << request->server_id()
+              << ", endpoint=" << request->raft_endpoint() << ")"
+              << " — " << (ok ? "accepted" : "rejected") << std::endl;
+
+    return grpc::Status::OK;
+}
+
+} // namespace kvick
+
+// ---- KVickServer ----
+
+KVickServer::KVickServer(int port, const std::string& node_id, const std::string& grpc_address,
+                         int raft_port, const std::vector<std::string>& seed_nodes,
+                         const std::string& data_dir)
+    : port_(port), node_id_(node_id), grpc_address_(grpc_address),
+      raft_port_(raft_port), data_dir_(data_dir), epoll_fd_(-1), server_fd_(-1) {
+
+    setupSignals();
+
+    // Load snapshot from disk
+    const std::string data_path = data_dir + "/kvick_data_" + node_id + ".bin";
+    store_.loadFromFile(data_path);
+    std::cout << "Loaded " << store_.size() << " keys from snapshot" << std::endl;
+
+    store_.enableAutoPersist(data_path, 30);
+
+    // Create Raft manager
+    raft_manager_ = std::make_unique<kvick::RaftManager>(node_id, raft_port, &store_, data_dir);
+
+    // Create Cluster manager
+    int32_t raft_server_id = kvick::hash::node_id_to_server_id(node_id);
+    std::string raft_endpoint = "0.0.0.0:" + std::to_string(raft_port);
+    cluster_manager_ = std::make_unique<kvick::ClusterManager>(
+        node_id, grpc_address, raft_endpoint, raft_server_id, seed_nodes);
+
+    // Create gRPC services
+    proxy_service_ = std::make_unique<kvick::KVProxyServiceImpl>(
+        &store_, raft_manager_.get(), cluster_manager_.get());
     gossip_service_ = std::make_unique<kvick::GossipServiceImpl>(cluster_manager_.get());
 
-    const std::string data_path = "/app/data/kvick_data_" + node_id + ".bin";
-    const std::string wal_path = "/app/data/kvick_" + node_id + ".wal";
-    
-    loadFromFile(data_path);
-    openWAL(wal_path);
-    replayWAL();
-    
-    enableAutoPersist(data_path, 30);
-
-    cluster_manager_ = std::make_unique<kvick::ClusterManager>(node_id, grpc_address, seed_nodes);
-    gossip_service_ = std::make_unique<kvick::GossipServiceImpl>(cluster_manager_.get());
-
+    // Start worker thread pool
     int num_workers = std::thread::hardware_concurrency();
     if (num_workers == 0) num_workers = 4;
     for (int i = 0; i < num_workers; ++i) {
@@ -30,20 +160,23 @@ KVickServer::KVickServer(int port, const std::string& node_id, const std::string
 }
 
 KVickServer::~KVickServer() {
-    stop_flag_ = true;
+    globalStopFlag() = true;
     cv_.notify_all();
+
+    if (raft_manager_) raft_manager_->stop();
     if (cluster_manager_) cluster_manager_->stop();
     if (grpc_server_) grpc_server_->Shutdown();
 
     for (auto& w : workers_) {
         if (w.joinable()) w.join();
     }
-    
+
     if (epoll_fd_ != -1) close(epoll_fd_);
     if (server_fd_ != -1) close(server_fd_);
-    
-    disableAutoPersist();
-    saveToFile("/app/data/kvick_data_" + node_id_ + ".bin");
+    if (signal_pipe_[0] != -1) { close(signal_pipe_[0]); close(signal_pipe_[1]); }
+
+    store_.disableAutoPersist();
+    store_.saveToFile(data_dir_ + "/kvick_data_" + node_id_ + ".bin");
     std::cout << "Data persisted on shutdown" << std::endl;
 }
 
@@ -54,13 +187,13 @@ void KVickServer::setNonBlocking(int sock) {
 }
 
 void KVickServer::worker_loop() {
-    while (!stop_flag_) {
+    while (!globalStopFlag()) {
         int sock;
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            cv_.wait(lock, [this] { return stop_flag_ || !task_queue_.empty(); });
-            if (stop_flag_ && task_queue_.empty()) return;
-            
+            cv_.wait(lock, [this] { return globalStopFlag() || !task_queue_.empty(); });
+            if (globalStopFlag() && task_queue_.empty()) return;
+
             sock = task_queue_.front();
             task_queue_.pop();
         }
@@ -68,22 +201,22 @@ void KVickServer::worker_loop() {
     }
 }
 
-std::string KVickServer::proxyRequest(const std::string& target_node_id, const std::string& op, const std::string& key, const std::string& val) {
-    std::string target_addr = "";
-    auto nodes = cluster_manager_->getActiveNodes();
-    for (const auto& n : nodes) {
-        if (n.node_id() == target_node_id) {
-            target_addr = n.address();
-            break;
-        }
-    }
-    
-    if (target_addr.empty()) {
-        return "ERR Node unavailable\n";
-    }
+// ---- gRPC channel pooling ----
 
-    auto channel = grpc::CreateChannel(target_addr, grpc::InsecureChannelCredentials());
+std::shared_ptr<kvick::KVProxyService::Stub> KVickServer::getProxyStub(const std::string& address) {
+    std::lock_guard<std::mutex> lock(stubs_mutex_);
+    auto it = proxy_stubs_.find(address);
+    if (it != proxy_stubs_.end()) return it->second;
+
+    auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
     auto stub = kvick::KVProxyService::NewStub(channel);
+    proxy_stubs_[address] = std::move(stub);
+    return proxy_stubs_[address];
+}
+
+std::string KVickServer::proxyToAddress(const std::string& address, const std::string& op,
+                                         const std::string& key, const std::string& val) {
+    auto stub = getProxyStub(address);
 
     kvick::KVRequest req;
     req.set_op(op);
@@ -92,21 +225,102 @@ std::string KVickServer::proxyRequest(const std::string& target_node_id, const s
 
     kvick::KVResponse res;
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
 
     grpc::Status status = stub->ProxyCommand(&context, req, &res);
 
     if (status.ok()) {
         if (res.success()) {
-            if (op == "GET") return res.result() + "\n";
-            else return "OK\n";
+            return res.result() + "\n";
         } else {
+            // If we were told who the leader is, try forwarding there
+            if (!res.leader_address().empty() && res.leader_address() != address) {
+                return proxyToAddress(res.leader_address(), op, key, val);
+            }
             return "ERR " + res.result() + "\n";
         }
-    } else {
-        return "ERR Proxy timeout or failure\n";
     }
+    return "ERR Proxy failed: " + status.error_message() + "\n";
 }
+
+// ---- Safe socket write ----
+
+bool KVickServer::sendResponse(int sock, const std::string& data) {
+    size_t total_sent = 0;
+    while (total_sent < data.size()) {
+        ssize_t sent = ::write(sock, data.c_str() + total_sent, data.size() - total_sent);
+        if (sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Briefly yield and retry
+                std::this_thread::yield();
+                continue;
+            }
+            return false; // Real error
+        }
+        total_sent += sent;
+    }
+    return true;
+}
+
+// ---- Format value as string ----
+
+std::string KVickServer::formatValue(const KVick::ValueType& val) {
+    return std::visit([](auto&& x) -> std::string {
+        using T = std::decay_t<decltype(x)>;
+        if constexpr (std::is_same_v<T, std::string>) return x;
+        else if constexpr (std::is_same_v<T, int64_t>) return std::to_string(x);
+        else if constexpr (std::is_same_v<T, double>) return std::to_string(x);
+        else if constexpr (std::is_same_v<T, bool>) return x ? "true" : "false";
+        else if constexpr (std::is_same_v<T, std::vector<std::string>> ||
+                           std::is_same_v<T, std::vector<int64_t>> ||
+                           std::is_same_v<T, std::vector<double>> ||
+                           std::is_same_v<T, std::vector<bool>>) {
+            std::ostringstream oss;
+            oss << "[";
+            for (size_t i = 0; i < x.size(); ++i) {
+                if constexpr (std::is_same_v<T, std::vector<bool>>) oss << (x[i] ? "true" : "false");
+                else if constexpr (std::is_same_v<T, std::vector<int64_t>> || std::is_same_v<T, std::vector<double>>) oss << std::to_string(x[i]);
+                else oss << x[i];
+                if (i + 1 < x.size()) oss << ", ";
+            }
+            oss << "]";
+            return oss.str();
+        }
+        return "";
+    }, val);
+}
+
+// ---- Raft cluster join ----
+
+void KVickServer::requestJoinRaftCluster() {
+    // After SWIM gossip has discovered the cluster, ask leader to add us
+    auto active = cluster_manager_->getActiveNodes();
+
+    for (const auto& node : active) {
+        if (node.node_id() == node_id_) continue;
+
+        // Try to join via this node's gRPC
+        auto stub = getProxyStub(node.address());
+        kvick::JoinRequest req;
+        req.set_server_id(kvick::hash::node_id_to_server_id(node_id_));
+        req.set_raft_endpoint("0.0.0.0:" + std::to_string(raft_port_));
+        req.set_node_id(node_id_);
+        req.set_grpc_address(grpc_address_);
+
+        kvick::JoinResponse res;
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+
+        auto status = stub->JoinCluster(&context, req, &res);
+        if (status.ok() && res.success()) {
+            std::cout << "[Raft] Successfully joined cluster via " << node.node_id() << std::endl;
+            return;
+        }
+    }
+    std::cout << "[Raft] Could not join existing Raft cluster (may be the first node)" << std::endl;
+}
+
+// ---- Main start ----
 
 void KVickServer::start() {
     // Start gRPC server
@@ -117,8 +331,23 @@ void KVickServer::start() {
     grpc_server_ = builder.BuildAndStart();
     std::cout << "gRPC Server listening on " << grpc_address_ << std::endl;
 
+    // Start SWIM gossip
     cluster_manager_->start();
 
+    // Start Raft
+    raft_manager_->start();
+
+    // Wait for SWIM to discover peers, with retries
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (cluster_manager_->getActiveNodes().size() > 1) {
+            requestJoinRaftCluster();
+            break;
+        }
+        std::cout << "[Startup] Waiting for peers... attempt " << attempt + 1 << std::endl;
+    }
+
+    // TCP server setup
     server_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd_ == -1) throw std::runtime_error("socket() failed");
 
@@ -145,14 +374,36 @@ void KVickServer::start() {
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_fd_, &ev) == -1)
         throw std::runtime_error("epoll_ctl() failed");
 
-    std::cout << "KVickServer TCP listening on port " << port_ << " with proxying\n";
+    // Add signal pipe to epoll for graceful shutdown
+    if (signal_pipe_[0] != -1) {
+        epoll_event sev{};
+        sev.events = EPOLLIN;
+        sev.data.fd = signal_pipe_[0];
+        epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, signal_pipe_[0], &sev);
+    }
+
+    std::cout << "KVickServer TCP listening on port " << port_
+              << " (Raft on " << raft_port_ << ")" << std::endl;
 
     const int MAX_EVENTS = 64;
     epoll_event events[MAX_EVENTS];
 
-    while (!stop_flag_) {
-        int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
+    while (!globalStopFlag()) {
+        int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, 1000); // 1s timeout
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
         for (int i = 0; i < n; ++i) {
+            if (events[i].data.fd == signal_pipe_[0]) {
+                // Signal received — drain pipe and exit
+                char buf[64];
+                while (::read(signal_pipe_[0], buf, sizeof(buf)) > 0) {}
+                globalStopFlag() = true;
+                break;
+            }
+
             if (events[i].data.fd == server_fd_) {
                 sockaddr_in cli;
                 socklen_t len = sizeof(cli);
@@ -160,7 +411,7 @@ void KVickServer::start() {
                 if (cli_sock == -1) continue;
 
                 setNonBlocking(cli_sock);
-                
+
                 {
                     std::lock_guard<std::mutex> lock(connections_mutex_);
                     connections_[cli_sock] = std::make_shared<Connection>();
@@ -168,7 +419,7 @@ void KVickServer::start() {
                 }
 
                 epoll_event client_ev{};
-                client_ev.events = EPOLLIN | EPOLLONESHOT | EPOLLET;
+                client_ev.events = EPOLLIN | EPOLLONESHOT | EPOLLET | EPOLLRDHUP;
                 client_ev.data.fd = cli_sock;
                 epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, cli_sock, &client_ev);
             } else {
@@ -186,9 +437,9 @@ void KVickServer::start() {
             }
         }
     }
-    
+
     if (grpc_server_) {
-        grpc_server_->Wait();
+        grpc_server_->Shutdown();
     }
 }
 
@@ -202,14 +453,14 @@ void KVickServer::handleClientCommand(int sock) {
     }
 
     std::lock_guard<std::mutex> conn_lock(conn->mutex);
-    
+
     char buf[4096];
     ssize_t r = ::read(sock, buf, sizeof(buf));
-    
+
     if (r <= 0) {
         if (r == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             epoll_event ev{};
-            ev.events = EPOLLIN | EPOLLONESHOT | EPOLLET;
+            ev.events = EPOLLIN | EPOLLONESHOT | EPOLLET | EPOLLRDHUP;
             ev.data.fd = sock;
             epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, sock, &ev);
             return;
@@ -233,66 +484,75 @@ void KVickServer::handleClientCommand(int sock) {
         std::istringstream iss(line);
         std::string op, key, val_str;
         iss >> op >> key;
-        
-        std::string target_node = cluster_manager_->getOwnerNode(key);
 
-        if (target_node != node_id_) {
-            // PROXY REQUEST
-            if (op == "SET") {
-                std::getline(iss, val_str);
-                if (!val_str.empty() && val_str.front() == ' ') val_str.erase(0,1);
-            }
-            std::string res = proxyRequest(target_node, op, key, val_str);
-            ::write(sock, res.c_str(), res.size());
-            continue;
-        }
-
-        // LOCAL EXECUTION
+        // --- GET: route to owner via consistent hashing ---
         if (op == "GET") {
-            try {
-                auto v = get(key);
-                std::ostringstream oss; 
-                std::visit([&oss](auto&& x) {
-                    using T = std::decay_t<decltype(x)>;
-                    if constexpr (std::is_same_v<T, std::string>) oss << x;
-                    else if constexpr (std::is_same_v<T, int>) oss << std::to_string(x);
-                    else if constexpr (std::is_same_v<T, double>) oss << std::to_string(x);
-                    else if constexpr (std::is_same_v<T, bool>) oss << (x ? "true" : "false");
-                    else if constexpr (std::is_same_v<T, std::vector<std::string>> ||
-                                       std::is_same_v<T, std::vector<int>> ||
-                                       std::is_same_v<T, std::vector<double>> ||
-                                       std::is_same_v<T, std::vector<bool>>) {
-                        oss << "[";
-                        for (size_t i = 0; i < x.size(); ++i) {
-                            if constexpr (std::is_same_v<T, std::vector<bool>>) oss << (x[i] ? "true" : "false");
-                            else if constexpr (std::is_same_v<T, std::vector<int>> || std::is_same_v<T, std::vector<double>>) oss << std::to_string(x[i]);
-                            else oss << x[i];
-                            if (i + 1 < x.size()) oss << ", ";
-                        }
-                        oss << "]";
-                    }
-                }, *v);
-                std::string out = oss.str() + "\n";
-                ::write(sock, out.c_str(), out.size());
-            } catch (const std::exception& e) {
-                std::string err = "ERR " + std::string(e.what()) + "\n";
-                ::write(sock, err.c_str(), err.size());
+            std::string owner = cluster_manager_->getOwnerNode(key);
+
+            if (owner == node_id_) {
+                // This node owns the key — read locally
+                try {
+                    auto v = store_.get(key);
+                    std::string out = formatValue(*v) + "\n";
+                    sendResponse(sock, out);
+                } catch (const std::exception& e) {
+                    sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
+                }
+            } else {
+                // Proxy GET to the owner node
+                std::string owner_addr = cluster_manager_->getAddressByNodeId(owner);
+                if (owner_addr.empty()) {
+                    sendResponse(sock, "ERR Owner node unreachable\n");
+                } else {
+                    std::string res = proxyToAddress(owner_addr, "GET", key);
+                    sendResponse(sock, res);
+                }
             }
-        } else if (op == "SET") {
+        }
+        // --- SET / DEL: go through Raft ---
+        else if (op == "SET") {
             std::getline(iss, val_str);
-            if (!val_str.empty() && val_str.front() == ' ') val_str.erase(0,1);
-            set(key, parseLiteral(val_str));
-            const char ok[] = "OK\n";
-            ::write(sock, ok, sizeof(ok)-1);
+            if (!val_str.empty() && val_str.front() == ' ') val_str.erase(0, 1);
+
+            std::string command = "SET " + key + " " + val_str;
+
+            if (raft_manager_->isLeader()) {
+                auto result = raft_manager_->proposeWrite(command);
+                sendResponse(sock, result.success ? "OK\n" : ("ERR " + result.message + "\n"));
+            } else {
+                // Forward to leader
+                int32_t leader_id = raft_manager_->getLeaderId();
+                std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
+                if (leader_addr.empty()) {
+                    sendResponse(sock, "ERR No leader available\n");
+                } else {
+                    std::string res = proxyToAddress(leader_addr, "SET", key, val_str);
+                    sendResponse(sock, res);
+                }
+            }
         } else if (op == "DEL") {
-            bool deleted = del(key);
-            if (deleted) ::write(sock, "OK\n", 3);
-            else ::write(sock, "ERR Not Found\n", 14);
+            std::string command = "DEL " + key;
+
+            if (raft_manager_->isLeader()) {
+                auto result = raft_manager_->proposeWrite(command);
+                sendResponse(sock, result.success ? "OK\n" : ("ERR " + result.message + "\n"));
+            } else {
+                int32_t leader_id = raft_manager_->getLeaderId();
+                std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
+                if (leader_addr.empty()) {
+                    sendResponse(sock, "ERR No leader available\n");
+                } else {
+                    std::string res = proxyToAddress(leader_addr, "DEL", key);
+                    sendResponse(sock, res);
+                }
+            }
+        } else {
+            sendResponse(sock, "ERR Unknown command\n");
         }
     }
 
     epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLONESHOT | EPOLLET;
+    ev.events = EPOLLIN | EPOLLONESHOT | EPOLLET | EPOLLRDHUP;
     ev.data.fd = sock;
     epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, sock, &ev);
 }

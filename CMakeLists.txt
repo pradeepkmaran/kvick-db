@@ -5,27 +5,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# --- Dependencies ---
-
-# Threads
 find_package(Threads REQUIRED)
-
-# gRPC & Protobuf
-find_package(gRPC REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(Protobuf REQUIRED)
 
 # NuRaft
-include(FetchContent)
-FetchContent_Declare(
-  nuraft
-  GIT_REPOSITORY https://github.com/eBay/NuRaft.git
-  GIT_TAG        master
-)
-# NuRaft relies on Asio, Zlib, OpenSSL. Make sure they are available.
-find_package(OpenSSL REQUIRED)
-find_package(ZLIB REQUIRED)
+find_library(NURAFT_LIB nuraft PATHS /usr/local/lib REQUIRED)
+find_path(NURAFT_INCLUDE_DIR libnuraft/nuraft.hxx PATHS /usr/local/include REQUIRED)
 
-FetchContent_MakeAvailable(nuraft)
+# gRPC via pkg-config only (apt version on Ubuntu 24.04 has broken CMake config)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)
 
-# --- Subdirectories ---
 add_subdirectory(src)

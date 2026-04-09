@@ -6,7 +6,7 @@ package kvick;
 
 message NodeInfo {
   string node_id = 1;
-  string address = 2; // e.g., "192.168.1.10:50051"
+  string address = 2; // gRPC address, e.g. "192.168.1.10:50051"
   uint64 incarnation = 3;
   enum State {
     ALIVE = 0;
@@ -15,6 +15,8 @@ message NodeInfo {
     LEFT = 3;
   }
   State state = 4;
+  string raft_endpoint = 5; // NuRaft endpoint, e.g. "192.168.1.10:10051"
+  int32 raft_server_id = 6; // NuRaft server ID
 }
 
 message PingMessage {
@@ -51,8 +53,24 @@ message KVRequest {
 message KVResponse {
   bool success = 1;
   string result = 2; // Value for GET, or error message, or "OK"
+  string leader_address = 3; // gRPC address of current Raft leader (for redirects)
+}
+
+// --- Raft Cluster Join ---
+
+message JoinRequest {
+  int32 server_id = 1;
+  string raft_endpoint = 2;
+  string node_id = 3;
+  string grpc_address = 4;
+}
+
+message JoinResponse {
+  bool success = 1;
+  string error = 2;
 }
 
 service KVProxyService {
   rpc ProxyCommand(KVRequest) returns (KVResponse);
+  rpc JoinCluster(JoinRequest) returns (JoinResponse);
 }
