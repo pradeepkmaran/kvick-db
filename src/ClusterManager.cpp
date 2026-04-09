@@ -211,7 +211,6 @@ void ClusterManager::gossipLoop() {
             context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
             // context.set_wait_for_ready(true); // Wait for channel to connect instead of fast-failing during backoff
 
-            std::cout << "[SWIM DEBUG] Sending Ping to " << seed << std::endl;
             auto stub = getStub(seed);
             grpc::Status status = stub->Ping(&context, req, &res);
             if (status.ok()) {
@@ -340,7 +339,6 @@ void ClusterManager::gossipLoop() {
 }
 
 grpc::Status ClusterManager::Ping(grpc::ServerContext* context, const PingMessage* request, AckMessage* response) {
-    std::cout << "[SWIM DEBUG] Received Ping from " << request->sender_id() << std::endl;
     for (const auto& update : request->piggybacked_updates()) {
         updateNode(update);
     }
