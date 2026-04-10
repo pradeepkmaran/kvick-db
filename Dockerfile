@@ -22,7 +22,6 @@ COPY . /app
 RUN rm -rf build && mkdir build && cd build && cmake .. && make -j$(nproc)
 
 ENV PORT=8080
-ENV NODE_ID=node1
 ENV GRPC_PORT=50051
 ENV RAFT_PORT=10051
 ENV SEED_NODES=""
@@ -33,4 +32,4 @@ EXPOSE $PORT
 EXPOSE $GRPC_PORT
 EXPOSE $RAFT_PORT
 
-CMD ["sh", "-c", "./build/src/kvick --port $PORT --id $NODE_ID --grpc 0.0.0.0:$GRPC_PORT --advertise ${ADVERTISE_ADDRESS:-$(hostname):$GRPC_PORT} --raft-port $RAFT_PORT --data-dir $DATA_DIR $( [ -n \"$SEED_NODES\" ] && echo \"--seed $SEED_NODES\" )"]
+CMD ["sh", "-c", "./build/src/kvick --port $PORT --id ${NODE_ID:-$(hostname)} --grpc 0.0.0.0:$GRPC_PORT --advertise ${ADVERTISE_ADDRESS:-$(hostname):$GRPC_PORT} --raft-port $RAFT_PORT --data-dir $DATA_DIR $( [ -n \"$SEED_NODES\" ] && echo \"--seed $SEED_NODES\" )"]

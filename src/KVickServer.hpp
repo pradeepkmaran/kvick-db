@@ -134,6 +134,8 @@ private:
     static void signalHandler(int sig);
     void setupSignals();
     void requestJoinRaftCluster();
+
+    bool is_seed_;
 };
 
 #endif

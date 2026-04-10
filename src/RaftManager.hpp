@@ -22,7 +22,7 @@ public:
                 KVick* store, const std::string& data_dir);
     ~RaftManager();
 
-    void start();
+    void start(bool is_seed);
     void stop();
 
     // Propose a write command ("SET key value" or "DEL key").

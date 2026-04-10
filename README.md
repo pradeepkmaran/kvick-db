@@ -158,38 +158,36 @@ docker run -it --rm \
 version: '3.8'
 
 services:
-  node1:
+  seed:
     image: kvick-db
-    container_name: kvick-node1
-    ports: ["8081:8081", "50051:50051", "10051:10051"]
-    volumes: [kvick-node1-data:/app/data]
+    container_name: kvick-seed
+    # Exposing ports for the seed node so the host can send KV client commands to it
+    ports: ["8080:8080"]
+    volumes: [kvick-seed-data:/app/data]
     environment:
-      PORT: 8081
-      NODE_ID: node1
+      PORT: 8080
       GRPC_PORT: 50051
       RAFT_PORT: 10051
-      ADVERTISE_ADDRESS: kvick-node1:50051
-      SEED_NODES: kvick-node1:50051
+      SEED_NODES: kvick-seed:50051
+      ADVERTISE_ADDRESS: kvick-seed:50051
     networks: [kvick-net]
 
-  node2:
+  worker:
     image: kvick-db
-    container_name: kvick-node2
-    ports: ["8082:8082", "50052:50052", "10052:10052"]
-    volumes: [kvick-node2-data:/app/data]
+    deploy:
+      replicas: 4 # Scale natively mapping directly out to the swarm/docker engine
     environment:
-      PORT: 8082
-      NODE_ID: node2
-      GRPC_PORT: 50052
-      RAFT_PORT: 10052
-      ADVERTISE_ADDRESS: kvick-node2:50052
-      SEED_NODES: kvick-node1:50051
-    depends_on: [node1]
+      PORT: 8080
+      GRPC_PORT: 50051
+      RAFT_PORT: 10051
+      SEED_NODES: kvick-seed:50051
+    # We omit ADVERTISE_ADDRESS and NODE_ID so it dynamically picks up the generated hostname
+    # We do NOT map ports dynamically to avoid host collision when scaling
+    depends_on: [seed]
     networks: [kvick-net]
 
 volumes:
-  kvick-node1-data:
-  kvick-node2-data:
+  kvick-seed-data:
 
 networks:
   kvick-net:

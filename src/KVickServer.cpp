@@ -12,6 +12,9 @@ void KVickServer::signalHandler(int sig) {
 }
 
 void KVickServer::setupSignals() {
+    // Ignore SIGPIPE — short-lived clients (echo|nc) closing early must not kill the server
+    signal(SIGPIPE, SIG_IGN);
+
     struct sigaction sa{};
     sa.sa_handler = signalHandler;
     sigemptyset(&sa.sa_mask);
@@ -159,6 +162,14 @@ KVickServer::KVickServer(int port, const std::string& node_id, const std::string
     proxy_service_ = std::make_unique<kvick::KVProxyServiceImpl>(
         &store_, raft_manager_.get(), cluster_manager_.get());
     gossip_service_ = std::make_unique<kvick::GossipServiceImpl>(cluster_manager_.get());
+
+    is_seed_ = false;
+    for (const auto& s : seed_nodes) {
+        if (s == advertise_address_) {
+            is_seed_ = true;
+            break;
+        }
+    }
 
     // Start worker thread pool
     int num_workers = std::thread::hardware_concurrency();
@@ -363,12 +374,12 @@ void KVickServer::start() {
     std::cout << "gRPC Server listening on " << grpc_address_ << std::endl;
 
     // Start SWIM gossip
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(2));
     cluster_manager_->start();
 
 
     // Start Raft
-    raft_manager_->start();
+    raft_manager_->start(is_seed_);
 
     // Wait for SWIM to discover peers, with retries
     for (int attempt = 0; attempt < 10; ++attempt) {
@@ -578,6 +589,16 @@ void KVickServer::handleClientCommand(int sock) {
                     sendResponse(sock, res);
                 }
             }
+        } else if (op == "INFO") {
+            std::string role = raft_manager_->isLeader() ? "leader" : "follower";
+            int32_t leader_id = raft_manager_->getLeaderId();
+            auto active = cluster_manager_->getActiveNodes();
+            std::string info = "node:" + node_id_ +
+                               " role:" + role +
+                               " peers:" + std::to_string(active.size()) +
+                               " leader_id:" + std::to_string(leader_id) +
+                               " advertise:" + advertise_address_ + "\n";
+            sendResponse(sock, info);
         } else {
             sendResponse(sock, "ERR Unknown command\n");
         }

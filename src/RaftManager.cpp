@@ -42,7 +42,7 @@ RaftManager::~RaftManager() {
     stop();
 }
 
-void RaftManager::start() {
+void RaftManager::start(bool is_seed) {
     nuraft::raft_params params;
     params.heart_beat_interval_ = 100;
     params.election_timeout_lower_bound_ = 200;
@@ -57,13 +57,20 @@ void RaftManager::start() {
 
     auto logger = nuraft::cs_new<KVickRaftLogger>();
 
+    nuraft::raft_server::init_options opt;
+    // If not a seed node, wait for the actual leader to contact us instead of forming an isolated size-1 cluster.
+    if (!is_seed) {
+        opt.skip_initial_election_timeout_ = true;
+    }
+
     raft_instance_ = launcher_.init(
         state_machine_,
         state_manager_,
         logger,
         raft_port_,
         asio_opt,
-        params
+        params,
+        opt
     );
 
     if (!raft_instance_) {
