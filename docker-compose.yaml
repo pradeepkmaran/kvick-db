@@ -1,36 +1,78 @@
 services:
-  seed:
-    image: kvick-db
+  node1:
     build: .
-    container_name: kvick-seed
-    # Exposing ports for the seed node so the host can send KV client commands to it
-    ports: ["8080:8080"]
-    volumes: [kvick-seed-data:/app/data]
+    image: kvick-db
+    ports:
+      - "5000:5000"
+      - "50051:50051"
+      - "10051:10051"
     environment:
-      PORT: 8080
+      PORT: 5000
       GRPC_PORT: 50051
       RAFT_PORT: 10051
-      SEED_NODES: kvick-seed:50051
-      ADVERTISE_ADDRESS: kvick-seed:50051
-    networks: [kvick-net]
+      NODE_ID: node1
+      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: node1:50051
+      DATA_DIR: /app/data
+    volumes:
+      - node1-data:/app/data
+    networks:
+      kvick-net:
+        aliases:
+          - node1
 
-  worker:
-    image: kvick-db
+  node2:
     build: .
-    deploy:
-      replicas: 4 # You can scale this natively via `docker compose up --scale worker=5`
+    image: kvick-db
+    ports:
+      - "5001:5000"
+      - "50052:50051"
+      - "10052:10051"
     environment:
-      PORT: 8080
+      PORT: 5000
       GRPC_PORT: 50051
       RAFT_PORT: 10051
-      # Note: We omit ADVERTISE_ADDRESS and NODE_ID so Dockerfile defaults to $(hostname) dynamically!
-      SEED_NODES: kvick-seed:50051
-    # We do NOT map ports dynamically to avoid host collision when scaling
-    depends_on: [seed]
-    networks: [kvick-net]
+      NODE_ID: node2
+      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: node2:50051
+      DATA_DIR: /app/data
+    volumes:
+      - node2-data:/app/data
+    depends_on:
+      - node1
+    networks:
+      kvick-net:
+        aliases:
+          - node2
+
+  node3:
+    build: .
+    image: kvick-db
+    ports:
+      - "5002:5000"
+      - "50053:50051"
+      - "10053:10051"
+    environment:
+      PORT: 5000
+      GRPC_PORT: 50051
+      RAFT_PORT: 10051
+      NODE_ID: node3
+      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: node3:50051
+      DATA_DIR: /app/data
+    volumes:
+      - node3-data:/app/data
+    depends_on:
+      - node1
+    networks:
+      kvick-net:
+        aliases:
+          - node3
 
 volumes:
-  kvick-seed-data:
+  node1-data:
+  node2-data:
+  node3-data:
 
 networks:
   kvick-net:

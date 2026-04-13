@@ -21,7 +21,7 @@ COPY . /app
 
 RUN rm -rf build && mkdir build && cd build && cmake .. && make -j$(nproc)
 
-ENV PORT=8080
+ENV PORT=5000
 ENV GRPC_PORT=50051
 ENV RAFT_PORT=10051
 ENV SEED_NODES=""

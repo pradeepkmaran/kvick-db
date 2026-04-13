@@ -4,7 +4,7 @@ import threading
 def send_command(command):
     try:
         s = socket.socket()
-        s.connect(('localhost', 8080))
+        s.connect(('localhost', 5000))
         s.sendall(command.encode())
         response = s.recv(1024).decode()
         print(f"Command: {command.strip()} -> Response: {response.strip()}")

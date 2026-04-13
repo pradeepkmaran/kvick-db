@@ -537,18 +537,30 @@ void KVickServer::handleClientCommand(int sock) {
             } catch (const std::exception& e) {
                 // Key not found locally — if we're not the leader, try the leader
                 // (it's guaranteed to have the latest committed data)
-                if (!raft_manager_->isLeader()) {
-                    int32_t leader_id = raft_manager_->getLeaderId();
-                    std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
-                    if (!leader_addr.empty() && leader_addr != advertise_address_) {
-                        std::string res = proxyToAddress(leader_addr, "GET", key);
-                        sendResponse(sock, res);
+                bool found = false;
+                for (int i = 0; i < 3; ++i) { // 3 retries for leader discovery
+                    if (!raft_manager_->isLeader()) {
+                        int32_t leader_id = raft_manager_->getLeaderId();
+                        if (leader_id != -1) {
+                            std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
+                            if (!leader_addr.empty() && leader_addr != advertise_address_) {
+                                std::string res = proxyToAddress(leader_addr, "GET", key);
+                                sendResponse(sock, res);
+                                found = true;
+                                break;
+                            }
+                        }
+                        // Wait a bit for leader/cluster discovery
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     } else {
+                        // We ARE the leader and key doesn't exist
                         sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
+                        found = true;
+                        break;
                     }
-                } else {
-                    // We ARE the leader and key doesn't exist
-                    sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
+                }
+                if (!found) {
+                    sendResponse(sock, "ERR " + std::string(e.what()) + " (Leader not found)\n");
                 }
             }
         }

@@ -173,10 +173,10 @@ services:
     image: kvick-db
     container_name: kvick-seed
     # Exposing ports for the seed node so the host can send KV client commands to it
-    ports: ["8080:8080"]
+    ports: ["5000:5000"]
     volumes: [kvick-seed-data:/app/data]
     environment:
-      PORT: 8080
+      PORT: 5000
       GRPC_PORT: 50051
       RAFT_PORT: 10051
       SEED_NODES: kvick-seed:50051
@@ -188,7 +188,7 @@ services:
     deploy:
       replicas: 4 # Scale natively mapping directly out to the swarm/docker engine
     environment:
-      PORT: 8080
+      PORT: 5000
       GRPC_PORT: 50051
       RAFT_PORT: 10051
       SEED_NODES: kvick-seed:50051
