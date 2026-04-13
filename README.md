@@ -94,6 +94,17 @@ KVickServer (epoll + thread pool)
                         (SWIM gossip + hash ring)
 ```
 
+### Project Structure
+
+```
+src/
+├── core/               # Core storage engine (KVick)
+├── network/            # gRPC services, server logic, and SWIM gossip
+├── consensus/          # Raft implementation and state machine
+├── utils/              # Shared utilities (Hashing, Serialization)
+└── main.cpp            # Application entry point
+```
+
 ### Storage model
 
 All data lives in RAM — a 64-shard concurrent hash map with `shared_mutex` per shard. Reads never block each other. Writes lock only their own shard.

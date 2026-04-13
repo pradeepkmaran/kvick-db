@@ -2,7 +2,7 @@
 #define KVICK_RAFT_MANAGER_HPP
 
 #include <libnuraft/nuraft.hxx>
-#include "KVick.hpp"
+#include "../core/KVick.hpp"
 #include "KVickStateMachine.hpp"
 #include "KVickStateManager.hpp"
 #include <string>

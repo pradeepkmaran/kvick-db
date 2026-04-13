@@ -1,5 +1,5 @@
 #include "KVickServer.hpp"
-#include "Hash.hpp"
+#include "../utils/Hash.hpp"
 #include <iostream>
 #include <sstream>
 #include <cerrno>

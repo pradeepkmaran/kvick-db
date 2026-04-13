@@ -2,7 +2,7 @@
 #define KVICK_STATE_MACHINE_HPP
 
 #include <libnuraft/nuraft.hxx>
-#include "KVick.hpp"
+#include "../core/KVick.hpp"
 #include <mutex>
 
 namespace kvick {

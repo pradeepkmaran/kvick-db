@@ -1,9 +1,9 @@
 #ifndef KVICK_SERVER_HPP
 #define KVICK_SERVER_HPP
 
-#include "KVick.hpp"
+#include "../core/KVick.hpp"
 #include "ClusterManager.hpp"
-#include "RaftManager.hpp"
+#include "../consensus/RaftManager.hpp"
 #include <thread>
 #include <cstring>
 #include <stdexcept>

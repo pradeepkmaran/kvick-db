@@ -1,5 +1,5 @@
 #include "RaftManager.hpp"
-#include "Hash.hpp"
+#include "../utils/Hash.hpp"
 #include <iostream>
 #include <chrono>
 
