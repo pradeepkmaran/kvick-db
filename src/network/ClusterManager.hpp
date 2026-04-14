@@ -21,7 +21,6 @@ namespace kvick {
 class ClusterManager {
 public:
     ClusterManager(const std::string& node_id, const std::string& address,
-                   const std::string& raft_endpoint, int32_t raft_server_id,
                    const std::vector<std::string>& seed_nodes);
     ~ClusterManager();
 
@@ -34,12 +33,12 @@ public:
 
     // Consistent Hashing (used for read load balancing)
     std::string getOwnerNode(const std::string& key) const;
+    std::vector<NodeInfo> getReplicaNodes(const std::string& key, int N = 3) const;
     std::vector<NodeInfo> getActiveNodes() const;
     std::string getNodeId() const { return node_id_; }
     std::string getAddress() const { return address_; }
 
-    // Lookup a node's gRPC address by its Raft server ID
-    std::string getAddressByServerId(int32_t server_id) const;
+    // Lookup a node's gRPC address by its node ID
     std::string getAddressByNodeId(const std::string& node_id) const;
 
 private:
@@ -54,8 +53,6 @@ private:
 
     std::string node_id_;
     std::string address_;
-    std::string raft_endpoint_;
-    int32_t raft_server_id_;
     uint64_t incarnation_;
     std::atomic<bool> stop_flag_{false};
 

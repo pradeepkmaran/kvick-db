@@ -28,7 +28,6 @@ int main(int argc, char* argv[]) {
     std::string node_id = "node1";
     std::string grpc_address = "0.0.0.0:50051";
     std::string advertise_address = "";
-    int raft_port = 10051;
     std::string data_dir = "/app/data";
     std::vector<std::string> seed_nodes;
 
@@ -42,8 +41,6 @@ int main(int argc, char* argv[]) {
     }
 
     advertise_address = getEnv("ADVERTISE_ADDRESS", advertise_address);
-
-    raft_port = std::stoi(getEnv("RAFT_PORT", std::to_string(raft_port)));
     data_dir = getEnv("DATA_DIR", data_dir);
 
     std::string seeds_env = getEnv("SEED_NODES");
@@ -62,8 +59,6 @@ int main(int argc, char* argv[]) {
             grpc_address = argv[++i];
         } else if (arg == "--advertise" && i + 1 < argc) {
             advertise_address = argv[++i];
-        } else if (arg == "--raft-port" && i + 1 < argc) {
-            raft_port = std::stoi(argv[++i]);
         } else if (arg == "--data-dir" && i + 1 < argc) {
             data_dir = argv[++i];
         } else if (arg == "--seed" && i + 1 < argc) {
@@ -82,7 +77,6 @@ int main(int argc, char* argv[]) {
               << " port=" << port
               << " grpc=" << grpc_address
               << " advertise=" << advertise_address
-              << " raft_port=" << raft_port
               << " seeds=";
 
     for (const auto& s : seed_nodes) std::cout << s << " ";
@@ -94,7 +88,6 @@ int main(int argc, char* argv[]) {
             node_id,
             grpc_address,
             advertise_address,
-            raft_port,
             seed_nodes,
             data_dir
         );

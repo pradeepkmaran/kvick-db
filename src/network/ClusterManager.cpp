@@ -7,10 +7,8 @@
 namespace kvick {
 
 ClusterManager::ClusterManager(const std::string& node_id, const std::string& address,
-                               const std::string& raft_endpoint, int32_t raft_server_id,
                                const std::vector<std::string>& seed_nodes)
-    : node_id_(node_id), address_(address), raft_endpoint_(raft_endpoint),
-      raft_server_id_(raft_server_id), incarnation_(0),
+    : node_id_(node_id), address_(address), incarnation_(0),
       seed_nodes_(seed_nodes), rng_(std::random_device{}()) {
 
     NodeInfo self_info;
@@ -18,8 +16,6 @@ ClusterManager::ClusterManager(const std::string& node_id, const std::string& ad
     self_info.set_address(address_);
     self_info.set_incarnation(incarnation_);
     self_info.set_state(NodeInfo::ALIVE);
-    self_info.set_raft_endpoint(raft_endpoint_);
-    self_info.set_raft_server_id(raft_server_id_);
 
     nodes_[node_id_] = self_info;
     rebuildHashRing();
@@ -100,14 +96,44 @@ std::string ClusterManager::getOwnerNode(const std::string& key) const {
     return it->second;
 }
 
-std::string ClusterManager::getAddressByServerId(int32_t server_id) const {
-    std::lock_guard<std::mutex> lock(nodes_mutex_);
-    for (const auto& [id, info] : nodes_) {
-        if (info.raft_server_id() == server_id) {
-            return info.address();
+std::vector<NodeInfo> ClusterManager::getReplicaNodes(const std::string& key, int N) const {
+    std::lock_guard<std::mutex> ring_lock(ring_mutex_);
+    std::lock_guard<std::mutex> nodes_lock(nodes_mutex_);
+    
+    if (hash_ring_.empty()) return {};
+
+    std::vector<NodeInfo> replicas;
+    uint32_t hash = hash::hash_string(key);
+    auto it = hash_ring_.lower_bound(hash);
+
+    size_t visited_vnodes = 0;
+    while (replicas.size() < (size_t)N && visited_vnodes < hash_ring_.size()) {
+        if (it == hash_ring_.end()) {
+            it = hash_ring_.begin();
         }
+
+        const std::string& node_id = it->second;
+        bool already_added = false;
+        for (const auto& r : replicas) {
+            if (r.node_id() == node_id) {
+                already_added = true;
+                break;
+            }
+        }
+
+        if (!already_added) {
+            auto node_it = nodes_.find(node_id);
+            if (node_it != nodes_.end() && 
+                (node_it->second.state() == NodeInfo::ALIVE || node_it->second.state() == NodeInfo::SUSPECT)) {
+                replicas.push_back(node_it->second);
+            }
+        }
+        
+        ++it;
+        visited_vnodes++;
     }
-    return "";
+
+    return replicas;
 }
 
 std::string ClusterManager::getAddressByNodeId(const std::string& node_id) const {
