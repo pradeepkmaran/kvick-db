@@ -124,22 +124,7 @@ std::shared_ptr<GossipService::Stub> ClusterManager::getStub(const std::string& 
     std::lock_guard<std::mutex> lock(stubs_mutex_);
     auto it = stubs_.find(address);
     if (it == stubs_.end()) {
-        std::string target_addr = address;
-        auto colon = address.find(':');
-        if (colon != std::string::npos) {
-            std::string host = address.substr(0, colon);
-            std::string port = address.substr(colon + 1);
-            struct addrinfo hints{}, *res;
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-            if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
-                char ipstr[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, ipstr, sizeof(ipstr));
-                freeaddrinfo(res);
-                target_addr = "ipv4:" + std::string(ipstr) + ":" + port;
-            }
-        }
-        auto channel = grpc::CreateChannel(target_addr, grpc::InsecureChannelCredentials());
+        auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
         auto stub = GossipService::NewStub(channel);
         stubs_[address] = std::move(stub);
         return stubs_[address];
