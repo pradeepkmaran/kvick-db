@@ -35,7 +35,7 @@ KvickDB sits in the **etcd/Zookeeper tier** — the bottleneck is intentional. E
 python3 -c "
 import socket, time
 s = socket.socket()
-s.connect(('localhost', 8081))
+s.connect(('localhost', 5001))
 start = time.time()
 for i in range(10000):
     s.sendall(f'SET key{i} value{i}\n'.encode())
@@ -51,7 +51,7 @@ s.close()
 python3 -c "
 import socket, time
 s = socket.socket()
-s.connect(('localhost', 8081))
+s.connect(('localhost', 5001))
 s.sendall(b'SET bench testvalue\n')
 s.recv(64)
 start = time.time()
@@ -156,9 +156,9 @@ Each node needs a unique ID, a TCP port (clients), a gRPC port (gossip + proxy),
 
 ```bash
 docker run -it --rm \
-  -p 8081:8081 -p 50051:50051 -p 10051:10051 \
+  -p 5001:5001 -p 50051:50051 -p 10051:10051 \
   -v kvick-node1-data:/app/data \
-  -e PORT=8081 -e NODE_ID=node1 \
+  -e PORT=5001 -e NODE_ID=node1 \
   -e GRPC_PORT=50051 -e RAFT_PORT=10051 \
   kvick-db
 ```
@@ -224,14 +224,16 @@ Plain-text TCP — works with `nc`, `telnet`, or any socket library.
 **Supported value types:** `int64`, `double`, `bool`, `string`, `[list]`
 
 ```bash
-echo "SET counter 42"         | nc localhost 8081
-echo "SET ratio 3.14"         | nc localhost 8081
-echo "SET flag true"          | nc localhost 8081
-echo "SET name hello"         | nc localhost 8081
-echo "SET scores [1,2,3]"     | nc localhost 8081
-echo "GET counter"            | nc localhost 8081
-echo "GET counter"            | nc localhost 8082   # works from any node
-echo "DEL flag"               | nc localhost 8081
+echo "SET counter 42"         | nc -q 1 localhost 5000
+echo "SET ratio 3.14"         | nc -q 1 localhost 5000
+echo "SET flag true"          | nc -q 1 localhost 5000
+echo "SET name hello"         | nc -q 1 localhost 5000
+echo "SET scores [1,2,3]"     | nc -q 1 localhost 5000
+echo "GET counter"            | nc -q 1 localhost 5000
+echo "GET counter"            | nc -q 1 localhost 5001
+echo "DEL flag"               | nc -q 1 localhost 5000
+echo "GET flag"               | nc -q 1 localhost 5000
+echo "GET flag"               | nc -q 1 localhost 5001
 ```
 
 ---

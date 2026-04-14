@@ -13,6 +13,6 @@ def test_service(port, commands):
 commands_5000 = ['SET username Pradeep\n', 'GET username\n']
 test_service(5000, commands_5000)
 
-# Test service on port 8081
-commands_8081 = ['SET username Alice\n', 'GET username\n']
-test_service(8081, commands_8081)
+# Test service on port 5001
+commands_5001 = ['SET username Alice\n', 'GET username\n']
+test_service(5001, commands_5001)
