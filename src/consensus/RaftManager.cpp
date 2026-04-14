@@ -1,5 +1,5 @@
 #include "RaftManager.hpp"
-#include "Hash.hpp"
+#include "../utils/Hash.hpp"
 #include <iostream>
 #include <chrono>
 
@@ -42,11 +42,11 @@ RaftManager::~RaftManager() {
     stop();
 }
 
-void RaftManager::start() {
+void RaftManager::start(bool is_seed) {
     nuraft::raft_params params;
-    params.heart_beat_interval_ = 100;
-    params.election_timeout_lower_bound_ = 200;
-    params.election_timeout_upper_bound_ = 400;
+    params.heart_beat_interval_ = 500;
+    params.election_timeout_lower_bound_ = 1000;
+    params.election_timeout_upper_bound_ = 2000;
     params.reserved_log_items_ = 5;
     params.snapshot_distance_ = 5000;
     params.client_req_timeout_ = 3000;
@@ -57,13 +57,20 @@ void RaftManager::start() {
 
     auto logger = nuraft::cs_new<KVickRaftLogger>();
 
+    nuraft::raft_server::init_options opt;
+    // If not a seed node, wait for the actual leader to contact us instead of forming an isolated size-1 cluster.
+    if (!is_seed) {
+        opt.skip_initial_election_timeout_ = true;
+    }
+
     raft_instance_ = launcher_.init(
         state_machine_,
         state_manager_,
         logger,
         raft_port_,
         asio_opt,
-        params
+        params,
+        opt
     );
 
     if (!raft_instance_) {
@@ -99,8 +106,8 @@ RaftManager::WriteResult RaftManager::proposeWrite(const std::string& command) {
     }
 
     // Serialize command into a buffer
-    auto buf = nuraft::buffer::alloc(command.size() + 1);
-    buf->put(command);
+    auto buf = nuraft::buffer::alloc(command.size());
+    buf->put_raw(reinterpret_cast<const nuraft::byte*>(command.data()), command.size());
     buf->pos(0);
 
     // Append to Raft log (blocking mode — waits for commit)
@@ -114,7 +121,9 @@ RaftManager::WriteResult RaftManager::proposeWrite(const std::string& command) {
     if (commit_result) {
         std::string msg(reinterpret_cast<const char*>(commit_result->data_begin()),
                         commit_result->size());
-        if (!msg.empty() && msg.back() == '\0') msg.pop_back();
+        // Clean up trailing nulls if any (for backward compatibility)
+        while (!msg.empty() && msg.back() == '\0') msg.pop_back();
+        
         bool ok = (msg == "OK");
         return {ok, msg};
     }

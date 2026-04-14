@@ -2,7 +2,7 @@
 #define KVICK_RAFT_MANAGER_HPP
 
 #include <libnuraft/nuraft.hxx>
-#include "KVick.hpp"
+#include "../core/KVick.hpp"
 #include "KVickStateMachine.hpp"
 #include "KVickStateManager.hpp"
 #include <string>
@@ -22,7 +22,7 @@ public:
                 KVick* store, const std::string& data_dir);
     ~RaftManager();
 
-    void start();
+    void start(bool is_seed);
     void stop();
 
     // Propose a write command ("SET key value" or "DEL key").

@@ -1,37 +1,78 @@
 services:
   node1:
-    image: kvick-db
     build: .
-    container_name: kvick-node1
-    ports: ["8081:8081", "50051:50051", "10051:10051"]
-    volumes: [kvick-node1-data:/app/data]
+    image: kvick-db
+    ports:
+      - "5000:5000"
+      - "50051:50051"
+      - "10051:10051"
     environment:
-      PORT: 8081
-      NODE_ID: node1
+      PORT: 5000
       GRPC_PORT: 50051
       RAFT_PORT: 10051
-      ADVERTISE_ADDRESS: kvick-node1:50051
-      SEED_NODES: kvick-node1:50051
-    networks: [kvick-net]
+      NODE_ID: node1
+      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: node1:50051
+      DATA_DIR: /app/data
+    volumes:
+      - node1-data:/app/data
+    networks:
+      kvick-net:
+        aliases:
+          - node1
 
   node2:
-    image: kvick-db
     build: .
-    container_name: kvick-node2
-    ports: ["8082:8082", "50052:50052", "10052:10052"]
-    volumes: [kvick-node2-data:/app/data]
+    image: kvick-db
+    ports:
+      - "5001:5000"
+      - "50052:50051"
+      - "10052:10051"
     environment:
-      PORT: 8082
+      PORT: 5000
+      GRPC_PORT: 50051
+      RAFT_PORT: 10051
       NODE_ID: node2
-      GRPC_PORT: 50052
-      RAFT_PORT: 10052
-      SEED_NODES: kvick-node1:50051
-      ADVERTISE_ADDRESS: kvick-node2:50052
-    depends_on: [node1]
-    networks: [kvick-net]
+      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: node2:50051
+      DATA_DIR: /app/data
+    volumes:
+      - node2-data:/app/data
+    depends_on:
+      - node1
+    networks:
+      kvick-net:
+        aliases:
+          - node2
+
+  node3:
+    build: .
+    image: kvick-db
+    ports:
+      - "5002:5000"
+      - "50053:50051"
+      - "10053:10051"
+    environment:
+      PORT: 5000
+      GRPC_PORT: 50051
+      RAFT_PORT: 10051
+      NODE_ID: node3
+      SEED_NODES: node1:50051
+      ADVERTISE_ADDRESS: node3:50051
+      DATA_DIR: /app/data
+    volumes:
+      - node3-data:/app/data
+    depends_on:
+      - node1
+    networks:
+      kvick-net:
+        aliases:
+          - node3
+
 volumes:
-  kvick-node1-data:
-  kvick-node2-data:
+  node1-data:
+  node2-data:
+  node3-data:
 
 networks:
   kvick-net:

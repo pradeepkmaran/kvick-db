@@ -17,8 +17,8 @@
 #include <atomic>
 #include <memory>
 
-#include "JSONSerializer.hpp"
-#include "Hash.hpp"
+#include "../utils/JSONSerializer.hpp"
+#include "../utils/Hash.hpp"
 
 class KVick {
 public:

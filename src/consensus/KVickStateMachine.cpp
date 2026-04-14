@@ -9,6 +9,8 @@ KVickStateMachine::KVickStateMachine(KVick* store)
 
 nuraft::ptr<nuraft::buffer> KVickStateMachine::commit(const uint64_t log_idx, nuraft::buffer& data) {
     std::string str(reinterpret_cast<const char*>(data.data_begin()), data.size());
+    // Robustly handle optional null terminators in the log
+    while (!str.empty() && str.back() == '\0') str.pop_back();
 
     std::istringstream iss(str);
     std::string op, key, val_str;
@@ -22,13 +24,13 @@ nuraft::ptr<nuraft::buffer> KVickStateMachine::commit(const uint64_t log_idx, nu
         store_->set(key, KVick::parseLiteral(val_str));
         // Return "OK" in result buffer
         std::string ok = "OK";
-        result = nuraft::buffer::alloc(ok.size() + 1);
-        result->put(ok);
+        result = nuraft::buffer::alloc(ok.size());
+        result->put_raw(reinterpret_cast<const nuraft::byte*>(ok.data()), ok.size());
     } else if (op == "DEL") {
         bool deleted = store_->del(key);
         std::string msg = deleted ? "OK" : "ERR Not Found";
-        result = nuraft::buffer::alloc(msg.size() + 1);
-        result->put(msg);
+        result = nuraft::buffer::alloc(msg.size());
+        result->put_raw(reinterpret_cast<const nuraft::byte*>(msg.data()), msg.size());
     }
 
     last_committed_idx_ = log_idx;

@@ -14,7 +14,7 @@
 
 #include <grpcpp/grpcpp.h>
 #include "kvick_internal.grpc.pb.h"
-#include "Hash.hpp"
+#include "../utils/Hash.hpp"
 
 namespace kvick {
 

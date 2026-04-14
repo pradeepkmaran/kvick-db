@@ -274,7 +274,7 @@ void ClusterManager::gossipLoop() {
 
         AckMessage res;
         grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(300));
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(1000));
 
         auto stub = getStub(target.address());
         grpc::Status status = stub->Ping(&context, req, &res);
@@ -376,7 +376,7 @@ grpc::Status ClusterManager::PingReq(grpc::ServerContext* context, const PingReq
 
     AckMessage probe_ack;
     grpc::ClientContext ctx;
-    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(300));
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(1000));
 
     auto stub = getStub(request->target_address());
     grpc::Status status = stub->Ping(&ctx, probe, &probe_ack);

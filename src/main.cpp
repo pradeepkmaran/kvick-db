@@ -1,4 +1,4 @@
-#include "KVickServer.hpp"
+#include "network/KVickServer.hpp"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -24,7 +24,7 @@ std::vector<std::string> split(const std::string& s, char delim) {
 
 int main(int argc, char* argv[]) {
     // ---- Defaults ----
-    int port = 8080;
+    int port = 5000;
     std::string node_id = "node1";
     std::string grpc_address = "0.0.0.0:50051";
     std::string advertise_address = "";

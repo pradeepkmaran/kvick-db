@@ -35,7 +35,7 @@ KvickDB sits in the **etcd/Zookeeper tier** — the bottleneck is intentional. E
 python3 -c "
 import socket, time
 s = socket.socket()
-s.connect(('localhost', 8081))
+s.connect(('localhost', 5001))
 start = time.time()
 for i in range(10000):
     s.sendall(f'SET key{i} value{i}\n'.encode())
@@ -51,7 +51,7 @@ s.close()
 python3 -c "
 import socket, time
 s = socket.socket()
-s.connect(('localhost', 8081))
+s.connect(('localhost', 5001))
 s.sendall(b'SET bench testvalue\n')
 s.recv(64)
 start = time.time()
@@ -92,6 +92,17 @@ KVickServer (epoll + thread pool)
                                    │
                          ClusterManager
                         (SWIM gossip + hash ring)
+```
+
+### Project Structure
+
+```
+src/
+├── core/               # Core storage engine (KVick)
+├── network/            # gRPC services, server logic, and SWIM gossip
+├── consensus/          # Raft implementation and state machine
+├── utils/              # Shared utilities (Hashing, Serialization)
+└── main.cpp            # Application entry point
 ```
 
 ### Storage model
@@ -145,9 +156,9 @@ Each node needs a unique ID, a TCP port (clients), a gRPC port (gossip + proxy),
 
 ```bash
 docker run -it --rm \
-  -p 8081:8081 -p 50051:50051 -p 10051:10051 \
+  -p 5001:5001 -p 50051:50051 -p 10051:10051 \
   -v kvick-node1-data:/app/data \
-  -e PORT=8081 -e NODE_ID=node1 \
+  -e PORT=5001 -e NODE_ID=node1 \
   -e GRPC_PORT=50051 -e RAFT_PORT=10051 \
   kvick-db
 ```
@@ -158,38 +169,36 @@ docker run -it --rm \
 version: '3.8'
 
 services:
-  node1:
+  seed:
     image: kvick-db
-    container_name: kvick-node1
-    ports: ["8081:8081", "50051:50051", "10051:10051"]
-    volumes: [kvick-node1-data:/app/data]
+    container_name: kvick-seed
+    # Exposing ports for the seed node so the host can send KV client commands to it
+    ports: ["5000:5000"]
+    volumes: [kvick-seed-data:/app/data]
     environment:
-      PORT: 8081
-      NODE_ID: node1
+      PORT: 5000
       GRPC_PORT: 50051
       RAFT_PORT: 10051
-      ADVERTISE_ADDRESS: kvick-node1:50051
-      SEED_NODES: kvick-node1:50051
+      SEED_NODES: kvick-seed:50051
+      ADVERTISE_ADDRESS: kvick-seed:50051
     networks: [kvick-net]
 
-  node2:
+  worker:
     image: kvick-db
-    container_name: kvick-node2
-    ports: ["8082:8082", "50052:50052", "10052:10052"]
-    volumes: [kvick-node2-data:/app/data]
+    deploy:
+      replicas: 4 # Scale natively mapping directly out to the swarm/docker engine
     environment:
-      PORT: 8082
-      NODE_ID: node2
-      GRPC_PORT: 50052
-      RAFT_PORT: 10052
-      ADVERTISE_ADDRESS: kvick-node2:50052
-      SEED_NODES: kvick-node1:50051
-    depends_on: [node1]
+      PORT: 5000
+      GRPC_PORT: 50051
+      RAFT_PORT: 10051
+      SEED_NODES: kvick-seed:50051
+    # We omit ADVERTISE_ADDRESS and NODE_ID so it dynamically picks up the generated hostname
+    # We do NOT map ports dynamically to avoid host collision when scaling
+    depends_on: [seed]
     networks: [kvick-net]
 
 volumes:
-  kvick-node1-data:
-  kvick-node2-data:
+  kvick-seed-data:
 
 networks:
   kvick-net:
@@ -215,14 +224,16 @@ Plain-text TCP — works with `nc`, `telnet`, or any socket library.
 **Supported value types:** `int64`, `double`, `bool`, `string`, `[list]`
 
 ```bash
-echo "SET counter 42"         | nc localhost 8081
-echo "SET ratio 3.14"         | nc localhost 8081
-echo "SET flag true"          | nc localhost 8081
-echo "SET name hello"         | nc localhost 8081
-echo "SET scores [1,2,3]"     | nc localhost 8081
-echo "GET counter"            | nc localhost 8081
-echo "GET counter"            | nc localhost 8082   # works from any node
-echo "DEL flag"               | nc localhost 8081
+echo "SET counter 42"         | nc -q 1 localhost 5000
+echo "SET ratio 3.14"         | nc -q 1 localhost 5000
+echo "SET flag true"          | nc -q 1 localhost 5000
+echo "SET name hello"         | nc -q 1 localhost 5000
+echo "SET scores [1,2,3]"     | nc -q 1 localhost 5000
+echo "GET counter"            | nc -q 1 localhost 5000
+echo "GET counter"            | nc -q 1 localhost 5001
+echo "DEL flag"               | nc -q 1 localhost 5000
+echo "GET flag"               | nc -q 1 localhost 5000
+echo "GET flag"               | nc -q 1 localhost 5001
 ```
 
 ---
@@ -261,13 +272,15 @@ SET key value
   └─► TCP recv                     ~0.01ms
   └─► Raft proposeWrite()
         └─► Leader serializes log entry
-        └─► Replicates to followers (heartbeat interval: 100ms)
+        └─► Replicates to followers (heartbeat interval: 500ms)
         └─► Majority ack → commit   ~0.20ms  ← dominates
   └─► KVickStateMachine::commit()
         └─► KVick::set() → shard lock → unordered_map insert  ~0.001ms
   └─► TCP send "OK"                ~0.01ms
 ─────────────────────────────────────────
 Total                              ~0.26ms
+
+> **Note on Timeouts:** Heartbeats and election timeouts are set conservatively (500ms / 1-2s) to ensure cluster stability in containerized environments (Docker/Kubernetes) where network jitter or DNS resolution delays are common.
 ```
 
 ### Why GET is 2× faster than SET
