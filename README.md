@@ -272,13 +272,15 @@ SET key value
   └─► TCP recv                     ~0.01ms
   └─► Raft proposeWrite()
         └─► Leader serializes log entry
-        └─► Replicates to followers (heartbeat interval: 100ms)
+        └─► Replicates to followers (heartbeat interval: 500ms)
         └─► Majority ack → commit   ~0.20ms  ← dominates
   └─► KVickStateMachine::commit()
         └─► KVick::set() → shard lock → unordered_map insert  ~0.001ms
   └─► TCP send "OK"                ~0.01ms
 ─────────────────────────────────────────
 Total                              ~0.26ms
+
+> **Note on Timeouts:** Heartbeats and election timeouts are set conservatively (500ms / 1-2s) to ensure cluster stability in containerized environments (Docker/Kubernetes) where network jitter or DNS resolution delays are common.
 ```
 
 ### Why GET is 2× faster than SET
