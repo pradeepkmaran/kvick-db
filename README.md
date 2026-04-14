@@ -62,23 +62,23 @@ KVick-DB is a **leaderless, Dynamo-inspired** distributed key-value store design
                           │  │  Consistent Hash Ring  │  │
                           │  │   (128 vnodes/node)    │  │
                           │  └──────────┬─────────────┘  │
-                          │             │                 │
+                          │             │                │
                           │  ┌──────────▼─────────────┐  │
-                          │  │  Quorum Assembly        │  │
-                          │  │  W writes / R reads     │  │
+                          │  │  Quorum Assembly       │  │
+                          │  │  W writes / R reads    │  │
                           │  └──────────┬─────────────┘  │
                           └─────────────┼────────────────┘
                        ┌────────────────┼────────────────┐
                        ▼                ▼                ▼
-               ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-               │    Node 1    │ │    Node 2    │ │    Node 3    │
-               │   (gRPC)     │ │   (gRPC)     │ │   (gRPC)     │
-               │  ┌────────┐  │ │  ┌────────┐  │ │  ┌────────┐  │
-               │  │ KVick  │  │ │  │ KVick  │  │ │  │ KVick  │  │
-               │  │ Store  │  │ │  │ Store  │  │ │  │ Store  │  │
-               │  │(64-shard)│ │ │  │(64-shard)│ │ │  │(64-shard)│ │
-               │  └────────┘  │ │  └────────┘  │ │  └────────┘  │
-               └──────────────┘ └──────────────┘ └──────────────┘
+               ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+               │    Node 1      │ │    Node 2      │ │    Node 3      │
+               │   (gRPC)       │ │   (gRPC)       │ │   (gRPC)       │
+               │  ┌──────────┐  │ │  ┌──────────┐  │ │  ┌──────────┐  │
+               │  │ KVic k   │  │ │  │ KVick    │  │ │  │ KVick    │  │
+               │  │ Store    │  │ │  │ Store    │  │ │  │ Store    │  │
+               │  │(64-shard)│  │ │  │(64-shard)│  │ │  │(64-shard)│  │
+               │  └──────────┘  │ │  └──────────┘  │ │  └──────────┘  │
+               └────────────────┘ └────────────────┘ └────────────────┘
                        ▲                ▲                ▲
                        └────────────────┼────────────────┘
                                   SWIM Gossip
@@ -140,13 +140,13 @@ node:node1 peers:3 advertise:node1:50051
 
 ```bash
 # Write a key (to any node — it coordinates replication automatically)
-echo "SET username Pradeep" | nc -q1 localhost 5000
+printf "SET val1 100\n" | nc -N localhost 5000
 
 # Read the key (from a different node to verify replication)
-echo "GET username" | nc -q1 localhost 5001
+printf "GET val1\n" | nc -N localhost 5001
 
 # Delete a key (causal tombstone)
-echo "DEL username" | nc -q1 localhost 5002
+printf "DEL val1\n" | nc -N localhost 5002
 ```
 
 ### 5. Stop the cluster
@@ -182,13 +182,13 @@ SET <key> <value> [W=n] [context={"node":counter,...}]
 
 ```bash
 # Simple write
-echo "SET mykey myvalue" | nc -q1 localhost 5000
+printf "SET mykey myvalue\n" | nc -N localhost 5000
 
 # Write with explicit quorum
-echo "SET mykey myvalue W=3" | nc -q1 localhost 5000
+printf "SET mykey myvalue W=3\n" | nc -N localhost 5000
 
 # Write with causal context (conflict resolution)
-echo 'SET mykey newvalue context={"node1":5}' | nc -q1 localhost 5000
+printf 'SET mykey newvalue context={"node1":5}\n' | nc -N localhost 5000
 ```
 
 **Response:** `OK {"node1":6}` (the updated vector clock)
@@ -207,7 +207,7 @@ GET <key> [R=n]
 **Example:**
 
 ```bash
-echo "GET mykey" | nc -q1 localhost 5000
+printf "GET mykey\n" | nc -N localhost 5000
 ```
 
 **Response (single value):**
