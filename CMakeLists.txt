@@ -10,10 +10,6 @@ find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Protobuf REQUIRED)
 
-# NuRaft
-find_library(NURAFT_LIB nuraft PATHS /usr/local/lib REQUIRED)
-find_path(NURAFT_INCLUDE_DIR libnuraft/nuraft.hxx PATHS /usr/local/include REQUIRED)
-
 # gRPC via pkg-config only (apt version on Ubuntu 24.04 has broken CMake config)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)

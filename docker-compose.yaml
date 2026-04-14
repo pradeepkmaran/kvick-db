@@ -5,11 +5,9 @@ services:
     ports:
       - "5000:5000"
       - "50051:50051"
-      - "10051:10051"
     environment:
       PORT: 5000
       GRPC_PORT: 50051
-      RAFT_PORT: 10051
       NODE_ID: node1
       SEED_NODES: node1:50051
       ADVERTISE_ADDRESS: node1:50051
@@ -27,11 +25,9 @@ services:
     ports:
       - "5001:5000"
       - "50052:50051"
-      - "10052:10051"
     environment:
       PORT: 5000
       GRPC_PORT: 50051
-      RAFT_PORT: 10051
       NODE_ID: node2
       SEED_NODES: node1:50051
       ADVERTISE_ADDRESS: node2:50051
@@ -51,11 +47,9 @@ services:
     ports:
       - "5002:5000"
       - "50053:50051"
-      - "10053:10051"
     environment:
       PORT: 5000
       GRPC_PORT: 50051
-      RAFT_PORT: 10051
       NODE_ID: node3
       SEED_NODES: node1:50051
       ADVERTISE_ADDRESS: node3:50051

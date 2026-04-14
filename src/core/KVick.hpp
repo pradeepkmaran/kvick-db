@@ -16,6 +16,7 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <map>
 
 #include "../utils/JSONSerializer.hpp"
 #include "../utils/Hash.hpp"
@@ -33,8 +34,30 @@ public:
         std::vector<double>
     >;
 
+    using VectorClock = std::map<std::string, uint32_t>;
+
+    struct VersionedValue {
+        ValueType value;
+        VectorClock clock;
+        bool is_tombstone;
+
+        VersionedValue(ValueType v, VectorClock c, bool tomb = false)
+            : value(std::move(v)), clock(std::move(c)), is_tombstone(tomb) {}
+    };
+
+    using SiblingList = std::vector<VersionedValue>;
+
+    enum class ClockComparison {
+        IDENTICAL,
+        DOMINATES,
+        DOMINATED,
+        CONCURRENT
+    };
+
+    static ClockComparison compareClocks(const VectorClock& a, const VectorClock& b);
+
 private:
-    using ShardMap = std::unordered_map<std::string, std::shared_ptr<ValueType>>;
+    using ShardMap = std::unordered_map<std::string, std::shared_ptr<SiblingList>>;
 
     struct Shard {
         ShardMap map;
@@ -52,14 +75,14 @@ private:
     std::thread persist_thread;
 
 public:
-    template<typename T>
-    void set(const std::string& key, const T& value);
+    void set(const std::string& key, const ValueType& value, const VectorClock& clock);
+    void del(const std::string& key, const VectorClock& clock);
 
-    std::shared_ptr<ValueType> get(const std::string& key) const;
+    std::shared_ptr<SiblingList> get(const std::string& key) const;
     bool exists(const std::string& key) const;
-    bool del(const std::string& key);
     std::string getType(const std::string& key) const;
 
+    // Returns first non-tombstone sibling's value as T
     template<typename T>
     T getAs(const std::string& key) const;
 
@@ -84,16 +107,13 @@ private:
 
 template<typename T>
 T KVick::getAs(const std::string& key) const {
-    auto val_ptr = get(key);
-    return std::get<T>(*val_ptr);
-}
-
-// In-place write under unique_lock — no COW copy of the entire shard map.
-template<typename T>
-void KVick::set(const std::string& key, const T& value) {
-    size_t idx = getShardIndex(key);
-    std::unique_lock<std::shared_mutex> lock(shards[idx].mutex);
-    shards[idx].map[key] = std::make_shared<ValueType>(value);
+    auto siblings = get(key);
+    for (const auto& s : *siblings) {
+        if (!s.is_tombstone) {
+            return std::get<T>(s.value);
+        }
+    }
+    throw std::runtime_error("No non-tombstone siblings for key: " + key);
 }
 
 #endif

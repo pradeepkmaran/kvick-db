@@ -33,12 +33,12 @@ target_include_directories(kvick_proto PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
 add_executable(kvick
     core/KVick.cpp
     network/KVickServer.cpp
-    consensus/KVickStateMachine.cpp
-    consensus/KVickStateManager.cpp
-    consensus/RaftManager.cpp
     network/ClusterManager.cpp
     main.cpp
-    /nuraft/examples/in_memory_log_store.cxx
+)
+
+add_executable(kvick-bench
+    test/benchmark.cpp
 )
 
 target_include_directories(kvick PRIVATE
@@ -46,18 +46,18 @@ target_include_directories(kvick PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/core"
     "${CMAKE_CURRENT_SOURCE_DIR}/network"
-    "${CMAKE_CURRENT_SOURCE_DIR}/consensus"
     "${CMAKE_CURRENT_SOURCE_DIR}/utils"
-    "${NURAFT_INCLUDE_DIR}"
-    "${NURAFT_INCLUDE_DIR}/libnuraft"
-    /nuraft/examples
+)
+
+target_link_libraries(kvick-bench
+    PRIVATE
+    Threads::Threads
 )
 
 target_link_libraries(kvick
     PRIVATE
     Threads::Threads
     kvick_proto
-    "${NURAFT_LIB}"
     OpenSSL::SSL
     OpenSSL::Crypto
     ZLIB::ZLIB
