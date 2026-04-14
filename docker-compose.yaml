@@ -13,7 +13,7 @@ services:
       ADVERTISE_ADDRESS: node1:50051
       DATA_DIR: /app/data
     volumes:
-      - node1-data:/app/data
+      - ./data/node1:/app/data
     networks:
       kvick-net:
         aliases:
@@ -33,7 +33,7 @@ services:
       ADVERTISE_ADDRESS: node2:50051
       DATA_DIR: /app/data
     volumes:
-      - node2-data:/app/data
+      - ./data/node2:/app/data
     depends_on:
       - node1
     networks:
@@ -55,18 +55,13 @@ services:
       ADVERTISE_ADDRESS: node3:50051
       DATA_DIR: /app/data
     volumes:
-      - node3-data:/app/data
+      - ./data/node3:/app/data
     depends_on:
       - node1
     networks:
       kvick-net:
         aliases:
           - node3
-
-volumes:
-  node1-data:
-  node2-data:
-  node3-data:
 
 networks:
   kvick-net:
