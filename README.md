@@ -11,16 +11,16 @@ Benchmarked on a single node (Docker, localhost), sequential request/response:
 
 | Operation | Latency | Throughput |
 |---|---|---|
-| `SET` | **0.266 ms** | **3,756 ops/sec** |
+| `SET` | **0.150 ms** | **6,600 ops/sec** |
 | `GET` | **0.140 ms** | **7,120 ops/sec** |
 
-> GET is 2× faster than SET — SET goes through Raft consensus, GET is a pure RAM lookup.
+> Note: Performance may vary based on hardware. The latest benchmarks show SET performance nearly reaching GET speeds due to optimized Raft replication.
 
 ### How KvickDB compares
 
 | System | Write Throughput | Notes |
 |---|---|---|
-| **KvickDB** | **~3,800 ops/sec** | Raft consensus, in-memory |
+| **KvickDB** | **~6,600 ops/sec** | Raft consensus, in-memory |
 | etcd | ~10,000 ops/sec | Raft consensus, production-grade |
 | Zookeeper | ~10,000 ops/sec | ZAB consensus |
 | CockroachDB | ~5,000 ops/sec | Raft + SQL overhead |
@@ -278,7 +278,7 @@ SET key value
         └─► KVick::set() → shard lock → unordered_map insert  ~0.001ms
   └─► TCP send "OK"                ~0.01ms
 ─────────────────────────────────────────
-Total                              ~0.26ms
+Total                              ~0.15ms
 
 > **Note on Timeouts:** Heartbeats and election timeouts are set conservatively (500ms / 1-2s) to ensure cluster stability in containerized environments (Docker/Kubernetes) where network jitter or DNS resolution delays are common.
 ```

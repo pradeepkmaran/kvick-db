@@ -231,31 +231,18 @@ std::shared_ptr<kvick::KVProxyService::Stub> KVickServer::getProxyStub(const std
     auto it = proxy_stubs_.find(address);
     if (it != proxy_stubs_.end()) return it->second;
 
-    std::string target_addr = address;
-    auto colon = address.find(':');
-    if (colon != std::string::npos) {
-        std::string host = address.substr(0, colon);
-        std::string port = address.substr(colon + 1);
-        struct addrinfo hints{}, *res;
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
-            char ipstr[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, ipstr, sizeof(ipstr));
-            freeaddrinfo(res);
-            target_addr = "ipv4:" + std::string(ipstr) + ":" + port;
-        }
-    }
-    auto channel = grpc::CreateChannel(target_addr, grpc::InsecureChannelCredentials());
+    auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
     auto stub = kvick::KVProxyService::NewStub(channel);
     proxy_stubs_[address] = std::move(stub);
     return proxy_stubs_[address];
 }
 
 std::string KVickServer::proxyToAddress(const std::string& address, const std::string& op,
-                                         const std::string& key, const std::string& val) {
-    auto stub = getProxyStub(address);
+                                         const std::string& key, const std::string& val, int depth) {
+    if (depth > 3) return "ERR Proxy recursion limit reached\n";
 
+    auto stub = getProxyStub(address);
+    // ... rest of method logic ...
     kvick::KVRequest req;
     req.set_op(op);
     req.set_key(key);
@@ -273,7 +260,7 @@ std::string KVickServer::proxyToAddress(const std::string& address, const std::s
         } else {
             // If we were told who the leader is, try forwarding there
             if (!res.leader_address().empty() && res.leader_address() != address) {
-                return proxyToAddress(res.leader_address(), op, key, val);
+                return proxyToAddress(res.leader_address(), op, key, val, depth + 1);
             }
             return "ERR " + res.result() + "\n";
         }
@@ -535,32 +522,26 @@ void KVickServer::handleClientCommand(int sock) {
                 auto v = store_.get(key);
                 sendResponse(sock, formatValue(*v) + "\n");
             } catch (const std::exception& e) {
-                // Key not found locally — if we're not the leader, try the leader
-                // (it's guaranteed to have the latest committed data)
+                // Key not found locally — if we're not the leader, try to proxy once
                 bool found = false;
-                for (int i = 0; i < 3; ++i) { // 3 retries for leader discovery
-                    if (!raft_manager_->isLeader()) {
-                        int32_t leader_id = raft_manager_->getLeaderId();
-                        if (leader_id != -1) {
-                            std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
-                            if (!leader_addr.empty() && leader_addr != advertise_address_) {
-                                std::string res = proxyToAddress(leader_addr, "GET", key);
-                                sendResponse(sock, res);
-                                found = true;
-                                break;
-                            }
+                if (!raft_manager_->isLeader()) {
+                    int32_t leader_id = raft_manager_->getLeaderId();
+                    if (leader_id != -1) {
+                        std::string leader_addr = cluster_manager_->getAddressByServerId(leader_id);
+                        if (!leader_addr.empty() && leader_addr != advertise_address_) {
+                            std::string res = proxyToAddress(leader_addr, "GET", key);
+                            sendResponse(sock, res);
+                            found = true;
                         }
-                        // Wait a bit for leader/cluster discovery
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    } else {
-                        // We ARE the leader and key doesn't exist
-                        sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
-                        found = true;
-                        break;
                     }
+                } else {
+                    // We ARE the leader and key doesn't exist
+                    sendResponse(sock, "ERR " + std::string(e.what()) + "\n");
+                    found = true;
                 }
+                
                 if (!found) {
-                    sendResponse(sock, "ERR " + std::string(e.what()) + " (Leader not found)\n");
+                    sendResponse(sock, "ERR " + std::string(e.what()) + " (Leader unavailable)\n");
                 }
             }
         }

@@ -124,7 +124,7 @@ private:
 
     std::shared_ptr<kvick::KVProxyService::Stub> getProxyStub(const std::string& address);
     std::string proxyToAddress(const std::string& address, const std::string& op,
-                               const std::string& key, const std::string& val = "");
+                               const std::string& key, const std::string& val = "", int depth = 0);
 
     // Safe socket write with partial-write handling
     bool sendResponse(int sock, const std::string& data);
